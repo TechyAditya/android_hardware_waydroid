@@ -1,3 +1,19 @@
+diff --git a/src/venus/vkr_device_memory.c b/src/venus/vkr_device_memory.c
+index ffe621b..777e6bc 100644
+--- a/src/venus/vkr_device_memory.c
++++ b/src/venus/vkr_device_memory.c
+@@ -367,6 +367,11 @@ vkr_dispatch_vkAllocateMemory(struct vn_dispatch_context *dispatch,
+ 
+    struct vkr_device_memory *mem = vkr_device_memory_create_and_add(ctx, args);
+    if (!mem) {
++      if (res_info) {
++         vkr_log("failed to import res %u as %" PRIu64 " bytes of memory type %u: %d",
++                 res_info->resourceId, alloc_info->allocationSize, mem_type_index,
++                 args->ret);
++      }
+       if (local_import_info.fd >= 0)
+          close(local_import_info.fd);
+       if (gbm_bo)
 diff --git a/vtest/vtest.h b/vtest/vtest.h
 index b2708a2..a9d924f 100644
 --- a/vtest/vtest.h
