@@ -1,0 +1,293 @@
+diff --git a/src/virtio/vtest/vtest_protocol.h b/src/virtio/vtest/vtest_protocol.h
+index 1bd515c..70ac8e8 100644
+--- a/src/virtio/vtest/vtest_protocol.h
++++ b/src/virtio/vtest/vtest_protocol.h
+@@ -27,7 +27,7 @@
+ 
+ #define VTEST_DEFAULT_SOCKET_NAME "/tmp/.virgl_test"
+ 
+-#define VTEST_PROTOCOL_VERSION 4
++#define VTEST_PROTOCOL_VERSION 5
+ 
+ /* 32-bit length field */
+ /* 32-bit cmd field */
+@@ -94,6 +94,9 @@
+ #define VCMD_DRM_SYNC_TRANSFER 37
+ #define VCMD_RESOURCE_EXPORT_FD 38
+ 
++/* since protocol version 5 */
++#define VCMD_RESOURCE_IMPORT_FD 39
++
+ #define VCMD_RES_CREATE_SIZE 10
+ #define VCMD_RES_CREATE_RES_HANDLE 0 /* must be 0 since protocol version 3 */
+ #define VCMD_RES_CREATE_TARGET 1
+@@ -349,4 +352,13 @@ struct vcmd_submit_cmd2_batch {
+ #define VCMD_RESOURCE_EXPORT_FD_RES_HANDLE 0
+ /* rsp fd */
+ 
++/* The command is followed by a dma-buf or memfd sent with SCM_RIGHTS.  A
++ * memfd is wrapped in a udmabuf, padded to at least SIZE.  SIZE may be 0 to
++ * use the size of the fd.
++ */
++#define VCMD_RESOURCE_IMPORT_FD_SIZE 2
++#define VCMD_RESOURCE_IMPORT_FD_SIZE_LO 0
++#define VCMD_RESOURCE_IMPORT_FD_SIZE_HI 1
++/* resp res_id */
++
+ #endif /* VTEST_PROTOCOL */
+diff --git a/src/virtio/vulkan/vn_android.c b/src/virtio/vulkan/vn_android.c
+index 52ed522..a08d8b5 100644
+--- a/src/virtio/vulkan/vn_android.c
++++ b/src/virtio/vulkan/vn_android.c
+@@ -34,21 +34,20 @@ struct vn_android_gralloc_buffer_properties {
+ static bool
+ vn_android_gralloc_get_buffer_properties(
+    buffer_handle_t handle,
++   uint32_t pixel_stride,
++   int hal_format,
+    struct vn_android_gralloc_buffer_properties *out_props)
+ {
+    struct u_gralloc *gralloc = vk_android_get_ugralloc();
+    struct u_gralloc_buffer_basic_info info;
+ 
+-   /*
+-    * We only support (and care of) CrOS and IMapper v4 gralloc modules
+-    * at this point. They don't need the pixel stride and HAL format
+-    * to be provided externally to them. It allows integrating u_gralloc
+-    * with minimal modifications at this point.
++   /* CrOS and IMapper gralloc modules ignore the pixel stride and HAL
++    * format, but the fallback module computes the layout from them.
+     */
+    struct u_gralloc_buffer_handle ugb_handle = {
+       .handle = handle,
+-      .pixel_stride = 0,
+-      .hal_format = 0,
++      .pixel_stride = pixel_stride,
++      .hal_format = hal_format,
+    };
+ 
+    if (u_gralloc_get_buffer_basic_info(gralloc, &ugb_handle, &info) != 0) {
+@@ -56,6 +55,13 @@ vn_android_gralloc_get_buffer_properties(
+       return false;
+    }
+ 
++   /* Grallocs that fall back are not GPU allocators, such as the default
++    * gralloc allocating from memfd, so their buffers are linear.
++    */
++   if (info.modifier == DRM_FORMAT_MOD_INVALID &&
++       u_gralloc_get_type(gralloc) == U_GRALLOC_TYPE_FALLBACK)
++      info.modifier = DRM_FORMAT_MOD_LINEAR;
++
+    if (info.modifier == DRM_FORMAT_MOD_INVALID) {
+       vn_log(NULL, "Unexpected DRM_FORMAT_MOD_INVALID");
+       return false;
+@@ -160,6 +166,8 @@ static VkResult
+ vn_android_get_image_builder(struct vn_device *dev,
+                              const VkImageCreateInfo *create_info,
+                              const native_handle_t *handle,
++                             uint32_t pixel_stride,
++                             int hal_format,
+                              struct vn_android_image_builder *out_builder)
+ {
+    /* Android image builder is only used by ANB or AHB. For ANB, Android
+@@ -173,7 +181,8 @@ vn_android_get_image_builder(struct vn_device *dev,
+                                 EXTERNAL_MEMORY_IMAGE_CREATE_INFO));
+ 
+    struct vn_android_gralloc_buffer_properties buf_props;
+-   if (!vn_android_gralloc_get_buffer_properties(handle, &buf_props))
++   if (!vn_android_gralloc_get_buffer_properties(handle, pixel_stride,
++                                                 hal_format, &buf_props))
+       return VK_ERROR_INVALID_EXTERNAL_HANDLE;
+ 
+    /* fill VkImageCreateInfo */
+@@ -260,6 +269,7 @@ vn_android_image_from_anb_internal(struct vn_device *dev,
+ 
+    struct vn_android_image_builder builder;
+    result = vn_android_get_image_builder(dev, create_info, anb_info->handle,
++                                         anb_info->stride, anb_info->format,
+                                          &builder);
+    if (result != VK_SUCCESS)
+       return result;
+@@ -422,9 +432,13 @@ vn_android_device_import_ahb(struct vn_device *dev,
+       struct vn_image *img = vn_image_from_handle(dedicated_info->image);
+ 
+       /* If ahb is for an image, finish the deferred image creation first */
++      AHardwareBuffer_Desc desc;
++      AHardwareBuffer_describe(mem_vk->ahardware_buffer, &desc);
++
+       struct vn_android_image_builder builder;
+       result = vn_android_get_image_builder(dev, &img->deferred_info->create,
+-                                            handle, &builder);
++                                            handle, desc.stride, desc.format,
++                                            &builder);
+       if (result != VK_SUCCESS)
+          return result;
+ 
+diff --git a/src/virtio/vulkan/vn_queue.c b/src/virtio/vulkan/vn_queue.c
+index 9756142..92e10d6 100644
+--- a/src/virtio/vulkan/vn_queue.c
++++ b/src/virtio/vulkan/vn_queue.c
+@@ -1908,6 +1908,23 @@ vn_create_sync_file(struct vn_device *dev,
+       return vn_error(dev->instance, result);
+    }
+ 
++   if (!dev->renderer->sync_ops.export_syncobj) {
++      /* vtest cannot share kernel sync files, so wait here and return the
++       * already-signaled sync fd -1
++       */
++      const struct vn_renderer_wait wait = {
++         .timeout = UINT64_MAX,
++         .syncs = &sync,
++         .sync_values = &(const uint64_t){ 1 },
++         .sync_count = 1,
++      };
++      result = vn_renderer_wait(dev->renderer, &wait);
++      vn_renderer_sync_destroy(dev->renderer, sync);
++      *out_fd = -1;
++      return result == VK_SUCCESS ? VK_SUCCESS
++                                  : vn_error(dev->instance, VK_ERROR_DEVICE_LOST);
++   }
++
+    *out_fd = vn_renderer_sync_export_syncobj(dev->renderer, sync, true);
+    vn_renderer_sync_destroy(dev->renderer, sync);
+ 
+diff --git a/src/virtio/vulkan/vn_renderer_vtest.c b/src/virtio/vulkan/vn_renderer_vtest.c
+index 5fad0b0..0ab5e19 100644
+--- a/src/virtio/vulkan/vn_renderer_vtest.c
++++ b/src/virtio/vulkan/vn_renderer_vtest.c
+@@ -144,6 +144,34 @@ vtest_receive_fd(struct vtest *vtest)
+    return *((int *)CMSG_DATA(cmsg));
+ }
+ 
++static void
++vtest_send_fd(struct vtest *vtest, int fd)
++{
++   char cmsg_buf[CMSG_SPACE(sizeof(int))];
++   char dummy = 0;
++   struct msghdr msg = {
++      .msg_iov =
++         &(struct iovec){
++            .iov_base = &dummy,
++            .iov_len = sizeof(dummy),
++         },
++      .msg_iovlen = 1,
++      .msg_control = cmsg_buf,
++      .msg_controllen = sizeof(cmsg_buf),
++   };
++
++   struct cmsghdr *cmsg = CMSG_FIRSTHDR(&msg);
++   cmsg->cmsg_level = SOL_SOCKET;
++   cmsg->cmsg_type = SCM_RIGHTS;
++   cmsg->cmsg_len = CMSG_LEN(sizeof(int));
++   memcpy(CMSG_DATA(cmsg), &fd, sizeof(fd));
++
++   if (sendmsg(vtest->sock_fd, &msg, 0) < 0) {
++      vn_log(vtest->instance, "sendmsg failed: %s", strerror(errno));
++      abort();
++   }
++}
++
+ static void
+ vtest_write(struct vtest *vtest, const void *buf, size_t size)
+ {
+@@ -363,6 +391,32 @@ vtest_vcmd_resource_unref(struct vtest *vtest, uint32_t res_id)
+    vtest_write(vtest, vcmd_res_unref, sizeof(vcmd_res_unref));
+ }
+ 
++static uint32_t
++vtest_vcmd_resource_import_fd(struct vtest *vtest, uint64_t size, int fd)
++{
++   uint32_t vtest_hdr[VTEST_HDR_SIZE];
++   uint32_t vcmd_import_fd[VCMD_RESOURCE_IMPORT_FD_SIZE];
++
++   vtest_hdr[VTEST_CMD_LEN] = VCMD_RESOURCE_IMPORT_FD_SIZE;
++   vtest_hdr[VTEST_CMD_ID] = VCMD_RESOURCE_IMPORT_FD;
++
++   vcmd_import_fd[VCMD_RESOURCE_IMPORT_FD_SIZE_LO] = (uint32_t)size;
++   vcmd_import_fd[VCMD_RESOURCE_IMPORT_FD_SIZE_HI] = (uint32_t)(size >> 32);
++
++   vtest_write(vtest, vtest_hdr, sizeof(vtest_hdr));
++   vtest_write(vtest, vcmd_import_fd, sizeof(vcmd_import_fd));
++   vtest_send_fd(vtest, fd);
++
++   vtest_read(vtest, vtest_hdr, sizeof(vtest_hdr));
++   assert(vtest_hdr[VTEST_CMD_LEN] == 1);
++   assert(vtest_hdr[VTEST_CMD_ID] == VCMD_RESOURCE_IMPORT_FD);
++
++   uint32_t res_id;
++   vtest_read(vtest, &res_id, sizeof(res_id));
++
++   return res_id;
++}
++
+ static uint32_t
+ vtest_vcmd_sync_create(struct vtest *vtest, uint64_t initial_val)
+ {
+@@ -778,6 +832,48 @@ vtest_bo_create_from_device_memory(
+    return VK_SUCCESS;
+ }
+ 
++static VkResult
++vtest_bo_create_from_dma_buf(struct vn_renderer *renderer,
++                             VkDeviceSize size,
++                             int fd,
++                             VkMemoryPropertyFlags flags,
++                             struct vn_renderer_bo **out_bo)
++{
++   struct vtest *vtest = (struct vtest *)renderer;
++
++   /* the server needs its own fd, which might also be a memfd that it wraps
++    * in a udmabuf; the client keeps mapping the original fd
++    */
++   int res_fd = os_dupfd_cloexec(fd);
++   if (res_fd < 0)
++      return VK_ERROR_TOO_MANY_OBJECTS;
++
++   mtx_lock(&vtest->sock_mutex);
++   const uint32_t res_id = vtest_vcmd_resource_import_fd(vtest, size, fd);
++   mtx_unlock(&vtest->sock_mutex);
++   if (!res_id) {
++      close(res_fd);
++      return VK_ERROR_INVALID_EXTERNAL_HANDLE;
++   }
++
++   const bool mappable = flags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT;
++   struct vtest_bo *bo = util_sparse_array_get(&vtest->bo_array, res_id);
++   *bo = (struct vtest_bo){
++      .base = {
++         .refcount = VN_REFCOUNT_INIT(1),
++         .res_id = res_id,
++         .mmap_size = mappable ? size : 0,
++      },
++      .res_fd = res_fd,
++      .blob_flags = (mappable ? VCMD_BLOB_FLAG_MAPPABLE : 0) |
++                    VCMD_BLOB_FLAG_SHAREABLE,
++   };
++
++   *out_bo = &bo->base;
++
++   return VK_SUCCESS;
++}
++
+ static void
+ vtest_shmem_destroy_now(struct vn_renderer *renderer,
+                         struct vn_renderer_shmem *_shmem)
+@@ -930,7 +1026,7 @@ vtest_init_renderer_info(struct vtest *vtest)
+    info->pci.vendor_id = VTEST_PCI_VENDOR_ID;
+    info->pci.device_id = VTEST_PCI_DEVICE_ID;
+ 
+-   info->has_dma_buf_import = false;
++   info->has_dma_buf_import = vtest->protocol_version >= 5;
+    info->has_external_sync = false;
+    info->has_implicit_fencing = false;
+ 
+@@ -1070,7 +1166,8 @@ vtest_init(struct vtest *vtest)
+ 
+    vtest->base.bo_ops.create_from_device_memory =
+       vtest_bo_create_from_device_memory;
+-   vtest->base.bo_ops.create_from_dma_buf = NULL;
++   vtest->base.bo_ops.create_from_dma_buf =
++      vtest->protocol_version >= 5 ? vtest_bo_create_from_dma_buf : NULL;
+    vtest->base.bo_ops.destroy = vtest_bo_destroy;
+    vtest->base.bo_ops.export_dma_buf = vtest_bo_export_dma_buf;
+    vtest->base.bo_ops.export_sync_file =
