@@ -1,0 +1,24 @@
+diff --git a/modules/gralloc/gralloc.cpp b/modules/gralloc/gralloc.cpp
+index 87bda97..711cf86 100644
+--- a/modules/gralloc/gralloc.cpp
++++ b/modules/gralloc/gralloc.cpp
+@@ -26,6 +26,8 @@
+ #include <sys/types.h>
+ #include <unistd.h>
+ 
++#include <numeric>
++
+ #include <cutils/ashmem.h>
+ #include <cutils/atomic.h>
+ #include <log/log.h>
+@@ -228,7 +230,9 @@ static int gralloc_alloc(alloc_device_t* dev,
+             return -EINVAL;
+     }
+ 
+-    const size_t tileWidth = 2;
++    // NVIDIA's Vulkan driver silently pads linear image rows to 128 bytes, so
++    // buffers shared with it must use that row alignment.
++    const size_t tileWidth = 128 / std::gcd(size_t(128), size_t(bytesPerPixel));
+     const size_t tileHeight = 2;
+ 
+     size_t stride = align(width, tileWidth);

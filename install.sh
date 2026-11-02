@@ -9,8 +9,9 @@ user=${SUDO_USER:?run with sudo}
 home=$(getent passwd "$user" | cut -d: -f6)
 prefix=${PREFIX:-$home/.local/lib/waydroid-venus}
 driver=$here/build/out/vulkan.virtio.so
+gralloc=$here/build/out/gralloc.default.so
 
-if [ ! -f "$driver" ] || [ ! -x "$prefix/bin/virgl_test_server" ]; then
+if [ ! -f "$driver" ] || [ ! -f "$gralloc" ] || [ ! -x "$prefix/bin/virgl_test_server" ]; then
    echo "run build.sh first" >&2
    exit 1
 fi
@@ -24,6 +25,7 @@ systemctl --user -M "$user@" enable waydroid-venus.service
 systemctl --user -M "$user@" restart waydroid-venus.service
 
 install -D -m 0644 "$driver" /var/lib/waydroid/overlay/vendor/lib64/hw/vulkan.virtio.so
+install -D -m 0644 "$gralloc" /var/lib/waydroid/overlay/vendor/lib64/hw/gralloc.default.so
 
 python3 - /var/lib/waydroid/waydroid.cfg <<'EOF'
 import configparser, sys

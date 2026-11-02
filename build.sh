@@ -27,6 +27,8 @@ fetch https://gitlab.freedesktop.org/virgl/virglrenderer.git "$virgl_tag" \
    "$build/virglrenderer" "$here/patches/virglrenderer-vtest-import-fd.patch"
 fetch https://gitlab.freedesktop.org/mesa/mesa.git "$mesa_tag" \
    "$build/mesa" "$here/patches/mesa-venus-vtest-android.patch"
+fetch https://android.googlesource.com/platform/hardware/libhardware android13-release \
+   "$build/libhardware" "$here/patches/gralloc-align-rows.patch"
 
 ndk=${ANDROID_NDK:-$build/android-ndk-$ndk_version}
 if [ ! -d "$ndk" ]; then
@@ -75,5 +77,17 @@ ninja -C "$build/mesa/build-android" src/virtio/vulkan/libvulkan_virtio.so
 "$ndk_bin/llvm-strip" -o "$build/out/vulkan.virtio.so" \
    "$build/mesa/build-android/src/virtio/vulkan/libvulkan_virtio.so"
 
+# AOSP's default gralloc with NVIDIA-compatible row alignment.  It links
+# against the stub libraries from the Mesa build; Waydroid uses 4 KiB pages.
+gralloc_src=$build/libhardware/modules/gralloc
+"$ndk_bin/x86_64-linux-android$android_api-clang++" -shared -fPIC -O2 -std=c++17 \
+   -static-libstdc++ -DPAGE_SIZE=4096 -DLOG_TAG='"gralloc"' \
+   -I"$here/gralloc/include" -I"$build/mesa/include/android_stub" -I"$gralloc_src" \
+   -o "$build/out/gralloc.default.so" \
+   "$gralloc_src/gralloc.cpp" "$gralloc_src/mapper.cpp" "$here/gralloc/framebuffer_stub.cpp" \
+   -L"$build/mesa/build-android/src/android_stub" -lcutils -llog
+"$ndk_bin/llvm-strip" "$build/out/gralloc.default.so"
+
 echo "render server: $prefix/bin/virgl_test_server"
 echo "android driver: $build/out/vulkan.virtio.so"
+echo "android gralloc: $build/out/gralloc.default.so"

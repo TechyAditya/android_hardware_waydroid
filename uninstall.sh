@@ -18,7 +18,8 @@ with open(sys.argv[1], "w") as f:
     cfg.write(f)
 EOF
 
-rm -f /var/lib/waydroid/overlay/vendor/lib64/hw/vulkan.virtio.so
+rm -f /var/lib/waydroid/overlay/vendor/lib64/hw/vulkan.virtio.so \
+   /var/lib/waydroid/overlay/vendor/lib64/hw/gralloc.default.so
 waydroid upgrade --offline
 
 systemctl --user -M "$user@" disable --now waydroid-venus.service || true
