@@ -1,0 +1,16 @@
+[Unit]
+Description=Venus render server for Waydroid (Android Vulkan on the host GPU)
+
+[Service]
+Environment=LD_LIBRARY_PATH=@PREFIX@/lib
+Environment=RENDER_SERVER_EXEC_PATH=@PREFIX@/libexec/virgl_render_server
+ExecStartPre=/usr/bin/install -d -m 0755 %h/.local/share/waydroid/data/venus
+ExecStartPre=/usr/bin/rm -f %h/.local/share/waydroid/data/venus/vtest.sock
+# Android apps run under their own uids and must be able to connect.
+UMask=0000
+ExecStart=@PREFIX@/bin/virgl_test_server --venus --no-virgl --socket-path %h/.local/share/waydroid/data/venus/vtest.sock
+Restart=always
+RestartSec=1
+
+[Install]
+WantedBy=default.target
