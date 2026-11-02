@@ -36,10 +36,24 @@ index 1bd515c..70ac8e8 100644
 +
  #endif /* VTEST_PROTOCOL */
 diff --git a/src/virtio/vulkan/vn_android.c b/src/virtio/vulkan/vn_android.c
-index 52ed522..a08d8b5 100644
+index 52ed522..ee7405d 100644
 --- a/src/virtio/vulkan/vn_android.c
 +++ b/src/virtio/vulkan/vn_android.c
-@@ -34,21 +34,20 @@ struct vn_android_gralloc_buffer_properties {
+@@ -16,11 +16,13 @@
+ #include "util/os_file.h"
+ #include "util/u_gralloc/u_gralloc.h"
+ #include "vk_android.h"
++#include "vk_common_entrypoints.h"
+ 
+ #include "vn_buffer.h"
+ #include "vn_device.h"
+ #include "vn_device_memory.h"
+ #include "vn_image.h"
++#include "vn_physical_device.h"
+ 
+ struct vn_android_gralloc_buffer_properties {
+    uint32_t num_planes;
+@@ -34,21 +36,20 @@ struct vn_android_gralloc_buffer_properties {
  static bool
  vn_android_gralloc_get_buffer_properties(
     buffer_handle_t handle,
@@ -67,7 +81,7 @@ index 52ed522..a08d8b5 100644
     };
  
     if (u_gralloc_get_buffer_basic_info(gralloc, &ugb_handle, &info) != 0) {
-@@ -56,6 +55,13 @@ vn_android_gralloc_get_buffer_properties(
+@@ -56,6 +57,13 @@ vn_android_gralloc_get_buffer_properties(
        return false;
     }
  
@@ -81,7 +95,7 @@ index 52ed522..a08d8b5 100644
     if (info.modifier == DRM_FORMAT_MOD_INVALID) {
        vn_log(NULL, "Unexpected DRM_FORMAT_MOD_INVALID");
        return false;
-@@ -160,6 +166,8 @@ static VkResult
+@@ -160,6 +168,8 @@ static VkResult
  vn_android_get_image_builder(struct vn_device *dev,
                               const VkImageCreateInfo *create_info,
                               const native_handle_t *handle,
@@ -90,7 +104,7 @@ index 52ed522..a08d8b5 100644
                               struct vn_android_image_builder *out_builder)
  {
     /* Android image builder is only used by ANB or AHB. For ANB, Android
-@@ -173,7 +181,8 @@ vn_android_get_image_builder(struct vn_device *dev,
+@@ -173,7 +183,8 @@ vn_android_get_image_builder(struct vn_device *dev,
                                  EXTERNAL_MEMORY_IMAGE_CREATE_INFO));
  
     struct vn_android_gralloc_buffer_properties buf_props;
@@ -100,7 +114,21 @@ index 52ed522..a08d8b5 100644
        return VK_ERROR_INVALID_EXTERNAL_HANDLE;
  
     /* fill VkImageCreateInfo */
-@@ -260,6 +269,7 @@ vn_android_image_from_anb_internal(struct vn_device *dev,
+@@ -181,6 +192,13 @@ vn_android_get_image_builder(struct vn_device *dev,
+    out_builder->create = *create_info;
+    out_builder->create.tiling = VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT;
+ 
++   /* NVIDIA rejects input attachment usage on linear images.  ANGLE adds it
++    * to every renderable AHB image, but only framebuffer fetch reads them as
++    * input attachments.
++    */
++   if (buf_props.modifier == DRM_FORMAT_MOD_LINEAR)
++      out_builder->create.usage &= ~VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT;
++
+    /* fill VkImageDrmFormatModifierExplicitCreateInfoEXT */
+    for (uint32_t i = 0; i < buf_props.num_planes; i++) {
+       out_builder->layouts[i].offset = buf_props.offset[i];
+@@ -260,6 +278,7 @@ vn_android_image_from_anb_internal(struct vn_device *dev,
  
     struct vn_android_image_builder builder;
     result = vn_android_get_image_builder(dev, create_info, anb_info->handle,
@@ -108,7 +136,69 @@ index 52ed522..a08d8b5 100644
                                           &builder);
     if (result != VK_SUCCESS)
        return result;
-@@ -422,9 +432,13 @@ vn_android_device_import_ahb(struct vn_device *dev,
+@@ -309,15 +328,16 @@ vn_android_image_from_anb_internal(struct vn_device *dev,
+       goto fail;
+    }
+ 
+-   const bool prefer_dedicated =
+-      img->requirements[0].dedicated.prefersDedicatedAllocation == VK_TRUE;
++   /* Always dedicated: NVIDIA fails non-dedicated dma-buf imports without
++    * reporting prefersDedicatedAllocation.
++    */
+    const VkMemoryDedicatedAllocateInfo dedicated_info = {
+       .sType = VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO,
+       .image = vn_image_to_handle(img),
+    };
+    const VkImportMemoryFdInfoKHR import_fd_info = {
+       .sType = VK_STRUCTURE_TYPE_IMPORT_MEMORY_FD_INFO_KHR,
+-      .pNext = prefer_dedicated ? &dedicated_info : NULL,
++      .pNext = &dedicated_info,
+       .handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT,
+       .fd = dup_fd,
+    };
+@@ -395,6 +415,41 @@ vn_android_get_wsi_memory_from_bind_info(
+    return img->wsi.anb_mem;
+ }
+ 
++VKAPI_ATTR VkResult VKAPI_CALL
++vn_GetAndroidHardwareBufferPropertiesANDROID(
++   VkDevice device,
++   const struct AHardwareBuffer *buffer,
++   VkAndroidHardwareBufferPropertiesANDROID *pProperties)
++{
++   VkResult result = vk_common_GetAndroidHardwareBufferPropertiesANDROID(
++      device, buffer, pProperties);
++   if (result != VK_SUCCESS)
++      return result;
++
++   /* Buffers in system memory, such as memfds that the renderer wraps in
++    * udmabufs, only import into system memory types.  ANGLE releases before
++    * 2024 require a device-local type for AHB imports, so also advertise the
++    * device-local types that are not host-visible.  The import falls back to
++    * a compatible type in vn_android_device_import_ahb.
++    */
++   const struct vn_device *dev = vn_device_from_handle(device);
++   const VkPhysicalDeviceMemoryProperties *mem_props =
++      &dev->physical_device->memory_properties;
++   uint32_t device_local_bits = 0;
++   for (uint32_t i = 0; i < mem_props->memoryTypeCount; i++) {
++      const VkMemoryPropertyFlags flags = mem_props->memoryTypes[i].propertyFlags;
++      if (!(flags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT))
++         continue;
++      if (pProperties->memoryTypeBits & (1u << i))
++         return VK_SUCCESS;
++      if (!(flags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT))
++         device_local_bits |= 1u << i;
++   }
++   pProperties->memoryTypeBits |= device_local_bits;
++
++   return VK_SUCCESS;
++}
++
+ VkResult
+ vn_android_device_import_ahb(struct vn_device *dev,
+                              struct vn_device_memory *mem,
+@@ -422,9 +477,13 @@ vn_android_device_import_ahb(struct vn_device *dev,
        struct vn_image *img = vn_image_from_handle(dedicated_info->image);
  
        /* If ahb is for an image, finish the deferred image creation first */
