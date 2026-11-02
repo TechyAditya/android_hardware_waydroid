@@ -22,6 +22,8 @@ for lib in lib64 lib; do
    rm -f "/var/lib/waydroid/overlay/vendor/$lib/hw/vulkan.virtio.so" \
       "/var/lib/waydroid/overlay/vendor/$lib/hw/gralloc.default.so"
 done
+rm -f /var/lib/waydroid/overlay/vendor/bin/waydroid-venus-recover.sh \
+   /var/lib/waydroid/overlay/vendor/etc/init/waydroid-venus.rc
 waydroid upgrade --offline
 
 systemctl --user -M "$user@" disable --now waydroid-venus.service || true

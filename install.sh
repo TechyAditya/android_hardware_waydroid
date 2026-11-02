@@ -29,6 +29,10 @@ for lib in lib64 lib; do
       install -D -m 0644 "$out/$lib/$module" "/var/lib/waydroid/overlay/vendor/$lib/hw/$module"
    done
 done
+install -D -m 0755 "$here/android/waydroid-venus-recover.sh" \
+   /var/lib/waydroid/overlay/vendor/bin/waydroid-venus-recover.sh
+install -D -m 0644 "$here/android/waydroid-venus.rc" \
+   /var/lib/waydroid/overlay/vendor/etc/init/waydroid-venus.rc
 
 python3 - /var/lib/waydroid/waydroid.cfg <<'EOF'
 import configparser, sys
