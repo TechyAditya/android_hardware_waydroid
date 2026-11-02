@@ -36,11 +36,18 @@ index 1bd515c..70ac8e8 100644
 +
  #endif /* VTEST_PROTOCOL */
 diff --git a/src/virtio/vulkan/vn_android.c b/src/virtio/vulkan/vn_android.c
-index 52ed522..ee7405d 100644
+index 52ed522..85030fc 100644
 --- a/src/virtio/vulkan/vn_android.c
 +++ b/src/virtio/vulkan/vn_android.c
-@@ -16,11 +16,13 @@
+@@ -11,16 +11,21 @@
+ #include "vn_android.h"
+ 
+ #include <dlfcn.h>
++#include <strings.h>
+ #include <vndk/hardware_buffer.h>
+ 
  #include "util/os_file.h"
++#include "util/stack_array.h"
  #include "util/u_gralloc/u_gralloc.h"
  #include "vk_android.h"
 +#include "vk_common_entrypoints.h"
@@ -50,10 +57,11 @@ index 52ed522..ee7405d 100644
  #include "vn_device_memory.h"
  #include "vn_image.h"
 +#include "vn_physical_device.h"
++#include "vn_queue.h"
  
  struct vn_android_gralloc_buffer_properties {
     uint32_t num_planes;
-@@ -34,21 +36,20 @@ struct vn_android_gralloc_buffer_properties {
+@@ -34,21 +39,20 @@ struct vn_android_gralloc_buffer_properties {
  static bool
  vn_android_gralloc_get_buffer_properties(
     buffer_handle_t handle,
@@ -81,7 +89,7 @@ index 52ed522..ee7405d 100644
     };
  
     if (u_gralloc_get_buffer_basic_info(gralloc, &ugb_handle, &info) != 0) {
-@@ -56,6 +57,13 @@ vn_android_gralloc_get_buffer_properties(
+@@ -56,6 +60,13 @@ vn_android_gralloc_get_buffer_properties(
        return false;
     }
  
@@ -95,7 +103,7 @@ index 52ed522..ee7405d 100644
     if (info.modifier == DRM_FORMAT_MOD_INVALID) {
        vn_log(NULL, "Unexpected DRM_FORMAT_MOD_INVALID");
        return false;
-@@ -160,6 +168,8 @@ static VkResult
+@@ -160,6 +171,8 @@ static VkResult
  vn_android_get_image_builder(struct vn_device *dev,
                               const VkImageCreateInfo *create_info,
                               const native_handle_t *handle,
@@ -104,7 +112,7 @@ index 52ed522..ee7405d 100644
                               struct vn_android_image_builder *out_builder)
  {
     /* Android image builder is only used by ANB or AHB. For ANB, Android
-@@ -173,7 +183,8 @@ vn_android_get_image_builder(struct vn_device *dev,
+@@ -173,7 +186,8 @@ vn_android_get_image_builder(struct vn_device *dev,
                                  EXTERNAL_MEMORY_IMAGE_CREATE_INFO));
  
     struct vn_android_gralloc_buffer_properties buf_props;
@@ -114,7 +122,7 @@ index 52ed522..ee7405d 100644
        return VK_ERROR_INVALID_EXTERNAL_HANDLE;
  
     /* fill VkImageCreateInfo */
-@@ -181,6 +192,13 @@ vn_android_get_image_builder(struct vn_device *dev,
+@@ -181,6 +195,13 @@ vn_android_get_image_builder(struct vn_device *dev,
     out_builder->create = *create_info;
     out_builder->create.tiling = VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT;
  
@@ -128,7 +136,7 @@ index 52ed522..ee7405d 100644
     /* fill VkImageDrmFormatModifierExplicitCreateInfoEXT */
     for (uint32_t i = 0; i < buf_props.num_planes; i++) {
        out_builder->layouts[i].offset = buf_props.offset[i];
-@@ -260,6 +278,7 @@ vn_android_image_from_anb_internal(struct vn_device *dev,
+@@ -260,6 +281,7 @@ vn_android_image_from_anb_internal(struct vn_device *dev,
  
     struct vn_android_image_builder builder;
     result = vn_android_get_image_builder(dev, create_info, anb_info->handle,
@@ -136,7 +144,7 @@ index 52ed522..ee7405d 100644
                                           &builder);
     if (result != VK_SUCCESS)
        return result;
-@@ -309,15 +328,16 @@ vn_android_image_from_anb_internal(struct vn_device *dev,
+@@ -309,15 +331,16 @@ vn_android_image_from_anb_internal(struct vn_device *dev,
        goto fail;
     }
  
@@ -156,7 +164,318 @@ index 52ed522..ee7405d 100644
        .handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT,
        .fd = dup_fd,
     };
-@@ -395,6 +415,41 @@ vn_android_get_wsi_memory_from_bind_info(
+@@ -349,6 +372,87 @@ fail:
+    return result;
+ }
+ 
++/* NVIDIA faults when drawing into a linear color attachment while a depth or
++ * stencil attachment is bound, which every HWUI window does.  ANB images from
++ * grallocs without a GPU are linear, so render them through an optimal shadow
++ * image that vn_QueueSignalReleaseImageANDROID copies to the linear image.
++ */
++static bool
++vn_android_anb_needs_shadow(const VkImageCreateInfo *create_info)
++{
++   return (create_info->usage & VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT) &&
++          u_gralloc_get_type(vk_android_get_ugralloc()) ==
++             U_GRALLOC_TYPE_FALLBACK;
++}
++
++static VkResult
++vn_android_image_create_shadow(struct vn_device *dev,
++                               const VkImageCreateInfo *create_info,
++                               const VkAllocationCallbacks *alloc,
++                               struct vn_image *linear,
++                               struct vn_image **out_img)
++{
++   VkDevice dev_handle = vn_device_to_handle(dev);
++
++   VkImageCreateInfo info = *create_info;
++   info.tiling = VK_IMAGE_TILING_OPTIMAL;
++   info.usage |= VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
++
++   struct vn_image *img;
++   VkResult result = vn_image_create(dev, &info, alloc, &img);
++   if (result != VK_SUCCESS)
++      return result;
++
++   const VkMemoryRequirements *req =
++      &img->requirements[0].memory.memoryRequirements;
++   const VkPhysicalDeviceMemoryProperties *mem_props =
++      &dev->physical_device->memory_properties;
++   uint32_t mem_type = ffs(req->memoryTypeBits) - 1;
++   for (uint32_t i = 0; i < mem_props->memoryTypeCount; i++) {
++      if ((req->memoryTypeBits & (1u << i)) &&
++          (mem_props->memoryTypes[i].propertyFlags &
++           VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)) {
++         mem_type = i;
++         break;
++      }
++   }
++
++   const VkMemoryDedicatedAllocateInfo dedicated_info = {
++      .sType = VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO,
++      .image = vn_image_to_handle(img),
++   };
++   const VkMemoryAllocateInfo mem_info = {
++      .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
++      .pNext = &dedicated_info,
++      .allocationSize = req->size,
++      .memoryTypeIndex = mem_type,
++   };
++   VkDeviceMemory mem;
++   result = vn_AllocateMemory(dev_handle, &mem_info, alloc, &mem);
++   if (result != VK_SUCCESS) {
++      vn_DestroyImage(dev_handle, vn_image_to_handle(img), alloc);
++      return result;
++   }
++
++   const VkBindImageMemoryInfo bind_info = {
++      .sType = VK_STRUCTURE_TYPE_BIND_IMAGE_MEMORY_INFO,
++      .image = vn_image_to_handle(img),
++      .memory = mem,
++   };
++   result = vn_BindImageMemory2(dev_handle, 1, &bind_info);
++   if (result != VK_SUCCESS) {
++      vn_FreeMemory(dev_handle, mem, alloc);
++      vn_DestroyImage(dev_handle, vn_image_to_handle(img), alloc);
++      return result;
++   }
++
++   img->wsi.shadow_mem = vn_device_memory_from_handle(mem);
++   img->wsi.anb_linear = linear;
++   *out_img = img;
++
++   return VK_SUCCESS;
++}
++
+ VkResult
+ vn_android_image_from_anb(struct vn_device *dev,
+                           const VkImageCreateInfo *create_info,
+@@ -356,9 +460,14 @@ vn_android_image_from_anb(struct vn_device *dev,
+                           const VkAllocationCallbacks *alloc,
+                           struct vn_image **out_img)
+ {
++   const bool needs_shadow = vn_android_anb_needs_shadow(create_info);
++   VkImageCreateInfo linear_info = *create_info;
++   if (needs_shadow)
++      linear_info.usage |= VK_IMAGE_USAGE_TRANSFER_DST_BIT;
++
+    struct vn_image *img = NULL;
+    VkResult result = vn_android_image_from_anb_internal(
+-      dev, create_info, anb_info, alloc, &img);
++      dev, &linear_info, anb_info, alloc, &img);
+    if (result != VK_SUCCESS)
+       return result;
+ 
+@@ -374,10 +483,206 @@ vn_android_image_from_anb(struct vn_device *dev,
+       return result;
+    }
+ 
++   if (needs_shadow) {
++      struct vn_image *shadow;
++      result =
++         vn_android_image_create_shadow(dev, create_info, alloc, img, &shadow);
++      if (result != VK_SUCCESS) {
++         vn_DestroyImage(vn_device_to_handle(dev), vn_image_to_handle(img),
++                         alloc);
++         return result;
++      }
++      img = shadow;
++   }
++
+    *out_img = img;
+    return VK_SUCCESS;
+ }
+ 
++static VkResult
++vn_android_record_shadow_copy(struct vn_device *dev,
++                              struct vn_image *img,
++                              uint32_t queue_family)
++{
++   if (img->wsi.shadow_cmd && img->wsi.shadow_queue_family == queue_family)
++      return VK_SUCCESS;
++
++   VkDevice dev_handle = vn_device_to_handle(dev);
++   const struct vk_device_dispatch_table *disp = &dev->base.vk.dispatch_table;
++   VkResult result;
++
++   if (!img->wsi.shadow_fence) {
++      const VkFenceCreateInfo fence_info = {
++         .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO,
++      };
++      result = disp->CreateFence(dev_handle, &fence_info, NULL,
++                                 &img->wsi.shadow_fence);
++      if (result != VK_SUCCESS)
++         return result;
++   }
++
++   if (img->wsi.shadow_pool) {
++      disp->DestroyCommandPool(dev_handle, img->wsi.shadow_pool, NULL);
++      img->wsi.shadow_pool = VK_NULL_HANDLE;
++      img->wsi.shadow_cmd = VK_NULL_HANDLE;
++   }
++
++   const VkCommandPoolCreateInfo pool_info = {
++      .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
++      .queueFamilyIndex = queue_family,
++   };
++   result = disp->CreateCommandPool(dev_handle, &pool_info, NULL,
++                                    &img->wsi.shadow_pool);
++   if (result != VK_SUCCESS)
++      return result;
++
++   const VkCommandBufferAllocateInfo cmd_info = {
++      .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
++      .commandPool = img->wsi.shadow_pool,
++      .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
++      .commandBufferCount = 1,
++   };
++   result =
++      disp->AllocateCommandBuffers(dev_handle, &cmd_info, &img->wsi.shadow_cmd);
++   if (result != VK_SUCCESS)
++      return result;
++
++   VkCommandBuffer cmd = img->wsi.shadow_cmd;
++   const VkCommandBufferBeginInfo begin_info = {
++      .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
++   };
++   result = disp->BeginCommandBuffer(cmd, &begin_info);
++   if (result != VK_SUCCESS)
++      return result;
++
++   const VkImageSubresourceRange range = {
++      .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
++      .levelCount = 1,
++      .layerCount = 1,
++   };
++   const VkImageMemoryBarrier to_copy[2] = {
++      {
++         .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
++         .srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT,
++         .dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT,
++         .oldLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
++         .newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
++         .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
++         .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
++         .image = vn_image_to_handle(img),
++         .subresourceRange = range,
++      },
++      {
++         .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
++         .dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
++         .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED,
++         .newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
++         .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
++         .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
++         .image = vn_image_to_handle(img->wsi.anb_linear),
++         .subresourceRange = range,
++      },
++   };
++   disp->CmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
++                            VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 0,
++                            NULL, 2, to_copy);
++
++   const VkImageCopy region = {
++      .srcSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 },
++      .dstSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 },
++      .extent = img->base.vk.extent,
++   };
++   disp->CmdCopyImage(cmd, vn_image_to_handle(img),
++                      VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
++                      vn_image_to_handle(img->wsi.anb_linear),
++                      VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
++
++   const VkImageMemoryBarrier after_copy[2] = {
++      {
++         .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
++         .srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT,
++         .oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
++         .newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
++         .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
++         .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
++         .image = vn_image_to_handle(img),
++         .subresourceRange = range,
++      },
++      {
++         .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
++         .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
++         .oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
++         .newLayout = VK_IMAGE_LAYOUT_GENERAL,
++         .srcQueueFamilyIndex = queue_family,
++         .dstQueueFamilyIndex = VK_QUEUE_FAMILY_FOREIGN_EXT,
++         .image = vn_image_to_handle(img->wsi.anb_linear),
++         .subresourceRange = range,
++      },
++   };
++   disp->CmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
++                            VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, 0, 0, NULL,
++                            0, NULL, 2, after_copy);
++
++   result = disp->EndCommandBuffer(cmd);
++   if (result != VK_SUCCESS)
++      return result;
++
++   img->wsi.shadow_queue_family = queue_family;
++   return VK_SUCCESS;
++}
++
++VKAPI_ATTR VkResult VKAPI_CALL
++vn_QueueSignalReleaseImageANDROID(VkQueue _queue,
++                                  uint32_t waitSemaphoreCount,
++                                  const VkSemaphore *pWaitSemaphores,
++                                  VkImage image,
++                                  int *pNativeFenceFd)
++{
++   struct vn_image *img = vn_image_from_handle(image);
++   if (!img->wsi.anb_linear) {
++      return vk_common_QueueSignalReleaseImageANDROID(
++         _queue, waitSemaphoreCount, pWaitSemaphores, image, pNativeFenceFd);
++   }
++
++   struct vn_queue *queue = vn_queue_from_handle(_queue);
++   struct vn_device *dev =
++      vn_device_from_handle(vk_device_to_handle(queue->base.vk.base.device));
++   VkDevice dev_handle = vn_device_to_handle(dev);
++   const struct vk_device_dispatch_table *disp = &dev->base.vk.dispatch_table;
++
++   VkResult result = vn_android_record_shadow_copy(
++      dev, img, queue->base.vk.queue_family_index);
++   if (result != VK_SUCCESS)
++      return vn_error(dev->instance, result);
++
++   STACK_ARRAY(VkPipelineStageFlags, wait_stages, waitSemaphoreCount);
++   for (uint32_t i = 0; i < waitSemaphoreCount; i++)
++      wait_stages[i] = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
++   const VkSubmitInfo submit_info = {
++      .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
++      .waitSemaphoreCount = waitSemaphoreCount,
++      .pWaitSemaphores = pWaitSemaphores,
++      .pWaitDstStageMask = wait_stages,
++      .commandBufferCount = 1,
++      .pCommandBuffers = &img->wsi.shadow_cmd,
++   };
++   result =
++      disp->QueueSubmit(_queue, 1, &submit_info, img->wsi.shadow_fence);
++   STACK_ARRAY_FINISH(wait_stages);
++   if (result != VK_SUCCESS)
++      return vn_error(dev->instance, result);
++
++   result = disp->WaitForFences(dev_handle, 1, &img->wsi.shadow_fence,
++                                VK_TRUE, UINT64_MAX);
++   if (result != VK_SUCCESS)
++      return vn_error(dev->instance, result);
++   disp->ResetFences(dev_handle, 1, &img->wsi.shadow_fence);
++
++   /* the copy has completed, so the native fence is already signaled */
++   *pNativeFenceFd = -1;
++   return VK_SUCCESS;
++}
++
+ struct vn_device_memory *
+ vn_android_get_wsi_memory_from_bind_info(
+    struct vn_device *dev, const VkBindImageMemoryInfo *bind_info)
+@@ -395,6 +700,41 @@ vn_android_get_wsi_memory_from_bind_info(
     return img->wsi.anb_mem;
  }
  
@@ -198,7 +517,7 @@ index 52ed522..ee7405d 100644
  VkResult
  vn_android_device_import_ahb(struct vn_device *dev,
                               struct vn_device_memory *mem,
-@@ -422,9 +477,13 @@ vn_android_device_import_ahb(struct vn_device *dev,
+@@ -422,9 +762,13 @@ vn_android_device_import_ahb(struct vn_device *dev,
        struct vn_image *img = vn_image_from_handle(dedicated_info->image);
  
        /* If ahb is for an image, finish the deferred image creation first */
@@ -213,6 +532,51 @@ index 52ed522..ee7405d 100644
        if (result != VK_SUCCESS)
           return result;
  
+diff --git a/src/virtio/vulkan/vn_image.c b/src/virtio/vulkan/vn_image.c
+index b5743aa..91c21fa 100644
+--- a/src/virtio/vulkan/vn_image.c
++++ b/src/virtio/vulkan/vn_image.c
+@@ -720,6 +720,18 @@ vn_DestroyImage(VkDevice device,
+       vn_FreeMemory(device, mem_handle, pAllocator);
+    }
+ 
++   if (img->wsi.anb_linear) {
++      const struct vk_device_dispatch_table *disp = &dev->base.vk.dispatch_table;
++      if (img->wsi.shadow_fence)
++         disp->DestroyFence(device, img->wsi.shadow_fence, NULL);
++      if (img->wsi.shadow_pool)
++         disp->DestroyCommandPool(device, img->wsi.shadow_pool, NULL);
++      vn_DestroyImage(device, vn_image_to_handle(img->wsi.anb_linear),
++                      pAllocator);
++      vn_FreeMemory(device, vn_device_memory_to_handle(img->wsi.shadow_mem),
++                    pAllocator);
++   }
++
+    /* must not ask renderer to destroy uninitialized deferred image */
+    if (!img->deferred_info || img->deferred_info->initialized)
+       vn_async_vkDestroyImage(dev->primary_ring, device, image, NULL);
+diff --git a/src/virtio/vulkan/vn_image.h b/src/virtio/vulkan/vn_image.h
+index 4e18632..cac667d 100644
+--- a/src/virtio/vulkan/vn_image.h
++++ b/src/virtio/vulkan/vn_image.h
+@@ -69,6 +69,17 @@ struct vn_image {
+ 
+       /* For VK_ANDROID_native_buffer, the WSI image owns the memory. */
+       struct vn_device_memory *anb_mem;
++
++      /* For VK_ANDROID_native_buffer images rendered through an optimal
++       * shadow image: the linear image bound to anb_mem, the memory of the
++       * shadow image, and the copy to the linear image at release.
++       */
++      struct vn_image *anb_linear;
++      struct vn_device_memory *shadow_mem;
++      VkCommandPool shadow_pool;
++      VkCommandBuffer shadow_cmd;
++      VkFence shadow_fence;
++      uint32_t shadow_queue_family;
+    } wsi;
+ };
+ VK_DEFINE_NONDISP_HANDLE_CASTS(vn_image,
 diff --git a/src/virtio/vulkan/vn_queue.c b/src/virtio/vulkan/vn_queue.c
 index 9756142..92e10d6 100644
 --- a/src/virtio/vulkan/vn_queue.c
