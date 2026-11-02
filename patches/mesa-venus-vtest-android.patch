@@ -606,10 +606,20 @@ index 9756142..92e10d6 100644
     vn_renderer_sync_destroy(dev->renderer, sync);
  
 diff --git a/src/virtio/vulkan/vn_renderer_vtest.c b/src/virtio/vulkan/vn_renderer_vtest.c
-index 5fad0b0..0ab5e19 100644
+index 5fad0b0..18360e2 100644
 --- a/src/virtio/vulkan/vn_renderer_vtest.c
 +++ b/src/virtio/vulkan/vn_renderer_vtest.c
-@@ -144,6 +144,34 @@ vtest_receive_fd(struct vtest *vtest)
+@@ -101,7 +101,8 @@ vtest_read(struct vtest *vtest, void *buf, size_t size)
+ {
+    do {
+       const ssize_t ret = read(vtest->sock_fd, buf, size);
+-      if (unlikely(ret < 0)) {
++      /* 0 means the server closed the connection */
++      if (unlikely(ret <= 0)) {
+          vn_log(vtest->instance,
+                 "lost connection to rendering server on %zu read %zi %d",
+                 size, ret, errno);
+@@ -144,6 +145,34 @@ vtest_receive_fd(struct vtest *vtest)
     return *((int *)CMSG_DATA(cmsg));
  }
  
@@ -644,7 +654,7 @@ index 5fad0b0..0ab5e19 100644
  static void
  vtest_write(struct vtest *vtest, const void *buf, size_t size)
  {
-@@ -363,6 +391,32 @@ vtest_vcmd_resource_unref(struct vtest *vtest, uint32_t res_id)
+@@ -363,6 +392,32 @@ vtest_vcmd_resource_unref(struct vtest *vtest, uint32_t res_id)
     vtest_write(vtest, vcmd_res_unref, sizeof(vcmd_res_unref));
  }
  
@@ -677,7 +687,7 @@ index 5fad0b0..0ab5e19 100644
  static uint32_t
  vtest_vcmd_sync_create(struct vtest *vtest, uint64_t initial_val)
  {
-@@ -778,6 +832,48 @@ vtest_bo_create_from_device_memory(
+@@ -778,6 +833,48 @@ vtest_bo_create_from_device_memory(
     return VK_SUCCESS;
  }
  
@@ -726,7 +736,7 @@ index 5fad0b0..0ab5e19 100644
  static void
  vtest_shmem_destroy_now(struct vn_renderer *renderer,
                          struct vn_renderer_shmem *_shmem)
-@@ -930,7 +1026,7 @@ vtest_init_renderer_info(struct vtest *vtest)
+@@ -930,7 +1027,7 @@ vtest_init_renderer_info(struct vtest *vtest)
     info->pci.vendor_id = VTEST_PCI_VENDOR_ID;
     info->pci.device_id = VTEST_PCI_DEVICE_ID;
  
@@ -735,7 +745,7 @@ index 5fad0b0..0ab5e19 100644
     info->has_external_sync = false;
     info->has_implicit_fencing = false;
  
-@@ -1070,7 +1166,8 @@ vtest_init(struct vtest *vtest)
+@@ -1070,7 +1167,8 @@ vtest_init(struct vtest *vtest)
  
     vtest->base.bo_ops.create_from_device_memory =
        vtest_bo_create_from_device_memory;
