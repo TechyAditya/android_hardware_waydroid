@@ -405,6 +405,11 @@ struct display {
     double content_scale_y;
     std::atomic<int> window_pixel_width;
     std::atomic<int> window_pixel_height;
+    // In single-window mode every window shares one Android display, sized from the focused window
+    bool multi_windows;
+    std::atomic<struct window *> size_window;
+    // Windows between window::create() and ~window(), guarded by windowsMutex
+    std::unordered_set<struct window *> live_windows;
 };
 
 void
