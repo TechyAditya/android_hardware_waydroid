@@ -1,0 +1,209 @@
+diff --git a/modules/gralloc/gralloc.cpp b/modules/gralloc/gralloc.cpp
+index 87bda97..e7ef620 100644
+--- a/modules/gralloc/gralloc.cpp
++++ b/modules/gralloc/gralloc.cpp
+@@ -26,6 +26,8 @@
+ #include <sys/types.h>
+ #include <unistd.h>
+ 
++#include <numeric>
++
+ #include <cutils/ashmem.h>
+ #include <cutils/atomic.h>
+ #include <log/log.h>
+@@ -62,6 +64,11 @@ extern int gralloc_lock(gralloc_module_t const* module,
+ extern int gralloc_unlock(gralloc_module_t const* module, 
+         buffer_handle_t handle);
+ 
++extern int gralloc_lock_ycbcr(gralloc_module_t const* module,
++        buffer_handle_t handle, int usage,
++        int l, int t, int w, int h,
++        struct android_ycbcr* ycbcr);
++
+ extern int gralloc_register_buffer(gralloc_module_t const* module,
+         buffer_handle_t handle);
+ 
+@@ -89,6 +96,7 @@ struct private_module_t HAL_MODULE_INFO_SYM = {
+         .unregisterBuffer = gralloc_unregister_buffer,
+         .lock = gralloc_lock,
+         .unlock = gralloc_unlock,
++        .lock_ycbcr = gralloc_lock_ycbcr,
+     },
+     .framebuffer = 0,
+     .flags = 0,
+@@ -200,6 +208,9 @@ inline size_t align(size_t value, size_t alignment)
+     return ((value + alignment - 1) / alignment) * alignment;
+ }
+ 
++// HAL_PIXEL_FORMAT_R_8 from graphics-base-v1.2
++static const int kFormatR8 = 0x38;
++
+ static int gralloc_alloc(alloc_device_t* dev,
+         int width, int height, int format, int usage,
+         buffer_handle_t* pHandle, int* pStride)
+@@ -207,44 +218,73 @@ static int gralloc_alloc(alloc_device_t* dev,
+     if (!pHandle || !pStride)
+         return -EINVAL;
+ 
+-    int bytesPerPixel = 0;
+-    switch (format) {
+-        case HAL_PIXEL_FORMAT_RGBA_FP16:
+-            bytesPerPixel = 8;
+-            break;
+-        case HAL_PIXEL_FORMAT_RGBA_8888:
+-        case HAL_PIXEL_FORMAT_RGBX_8888:
+-        case HAL_PIXEL_FORMAT_BGRA_8888:
+-            bytesPerPixel = 4;
+-            break;
+-        case HAL_PIXEL_FORMAT_RGB_888:
+-            bytesPerPixel = 3;
+-            break;
+-        case HAL_PIXEL_FORMAT_RGB_565:
+-        case HAL_PIXEL_FORMAT_RAW16:
+-            bytesPerPixel = 2;
+-            break;
+-        default:
+-            return -EINVAL;
++    if (format == HAL_PIXEL_FORMAT_IMPLEMENTATION_DEFINED) {
++        format = (usage & GRALLOC_USAGE_HW_CAMERA_WRITE)
++                ? HAL_PIXEL_FORMAT_YCbCr_420_888
++                : HAL_PIXEL_FORMAT_RGBA_8888;
+     }
+ 
+-    const size_t tileWidth = 2;
+     const size_t tileHeight = 2;
+-
+-    size_t stride = align(width, tileWidth);
+-    size_t size = align(height, tileHeight) * stride * bytesPerPixel + 4;
+-
+-    int err;
+-    if (usage & GRALLOC_USAGE_HW_FB) {
+-        err = gralloc_alloc_framebuffer(dev, size, format, usage, pHandle);
++    size_t stride, size;
++    if (format == HAL_PIXEL_FORMAT_YV12 ||
++            format == HAL_PIXEL_FORMAT_YCbCr_420_888) {
++        // YV12 as Android defines it, which also serves as the flexible
++        // YCbCr 4:2:0 layout through lock_ycbcr.
++        stride = align(width, 64);
++        const size_t cstride = align(stride / 2, 16);
++        size = align(height, tileHeight) * (stride + cstride);
++        format = HAL_PIXEL_FORMAT_YV12;
+     } else {
+-        err = gralloc_alloc_buffer(dev, size, usage, pHandle);
++        int bytesPerPixel = 0;
++        switch (format) {
++            case HAL_PIXEL_FORMAT_RGBA_FP16:
++                bytesPerPixel = 8;
++                break;
++            case HAL_PIXEL_FORMAT_RGBA_8888:
++            case HAL_PIXEL_FORMAT_RGBX_8888:
++            case HAL_PIXEL_FORMAT_BGRA_8888:
++            case HAL_PIXEL_FORMAT_RGBA_1010102:
++                bytesPerPixel = 4;
++                break;
++            case HAL_PIXEL_FORMAT_RGB_888:
++                bytesPerPixel = 3;
++                break;
++            case HAL_PIXEL_FORMAT_RGB_565:
++            case HAL_PIXEL_FORMAT_RAW16:
++            case HAL_PIXEL_FORMAT_Y16:
++                bytesPerPixel = 2;
++                break;
++            case HAL_PIXEL_FORMAT_BLOB:
++            case HAL_PIXEL_FORMAT_Y8:
++            case kFormatR8:
++                bytesPerPixel = 1;
++                break;
++            default:
++                ALOGW("unsupported format 0x%x (usage 0x%x)", format, usage);
++                return -EINVAL;
++        }
++
++        // NVIDIA's Vulkan driver silently pads linear image rows to 128
++        // bytes, so buffers shared with it must use that row alignment.
++        const size_t tileWidth = 128 / std::gcd(size_t(128), size_t(bytesPerPixel));
++        stride = align(width, tileWidth);
++        size = align(height, tileHeight) * stride * bytesPerPixel + 4;
+     }
+ 
++    // Waydroid has no framebuffer device, so framebuffer usage gets a
++    // regular buffer.
++    int err = gralloc_alloc_buffer(dev, size, usage, pHandle);
+     if (err < 0) {
+         return err;
+     }
+ 
++    private_handle_t* hnd = const_cast<private_handle_t*>(
++            reinterpret_cast<const private_handle_t*>(*pHandle));
++    hnd->format = format;
++    hnd->width = width;
++    hnd->height = align(height, tileHeight);
++    hnd->stride = stride;
++
+     *pStride = stride;
+     return 0;
+ }
+diff --git a/modules/gralloc/gralloc_priv.h b/modules/gralloc/gralloc_priv.h
+index 2cd1007..c5cabc0 100644
+--- a/modules/gralloc/gralloc_priv.h
++++ b/modules/gralloc/gralloc_priv.h
+@@ -77,6 +77,11 @@ struct private_handle_t {
+     // FIXME: the attributes below should be out-of-line
+     uint64_t base __attribute__((aligned(8)));
+     int     pid;
++    // layout, for lock_ycbcr
++    int     format;
++    int     width;
++    int     height;
++    int     stride;
+ 
+ #ifdef __cplusplus
+     static inline int sNumInts() {
+@@ -87,7 +92,7 @@ struct private_handle_t {
+ 
+     private_handle_t(int fd, int size, int flags) :
+         fd(fd), magic(sMagic), flags(flags), size(size), offset(0),
+-        base(0), pid(getpid())
++        base(0), pid(getpid()), format(0), width(0), height(0), stride(0)
+     {
+         version = sizeof(native_handle);
+         numInts = sNumInts();
+diff --git a/modules/gralloc/mapper.cpp b/modules/gralloc/mapper.cpp
+index ee3e40e..bd4db9b 100644
+--- a/modules/gralloc/mapper.cpp
++++ b/modules/gralloc/mapper.cpp
+@@ -175,6 +175,34 @@ int gralloc_lock(gralloc_module_t const* /*module*/,
+     return 0;
+ }
+ 
++int gralloc_lock_ycbcr(gralloc_module_t const* /*module*/,
++        buffer_handle_t handle, int /*usage*/,
++        int /*l*/, int /*t*/, int /*w*/, int /*h*/,
++        struct android_ycbcr* ycbcr)
++{
++    if (private_handle_t::validate(handle) < 0)
++        return -EINVAL;
++
++    private_handle_t* hnd = (private_handle_t*)handle;
++    if (hnd->format != HAL_PIXEL_FORMAT_YV12)
++        return -EINVAL;
++
++    const size_t ystride = hnd->stride;
++    const size_t cstride = (ystride / 2 + 15) & ~size_t(15);
++    uint8_t* y = (uint8_t*)hnd->base;
++    uint8_t* cr = y + ystride * hnd->height;
++    uint8_t* cb = cr + cstride * (hnd->height / 2);
++
++    memset(ycbcr, 0, sizeof(*ycbcr));
++    ycbcr->y = y;
++    ycbcr->cb = cb;
++    ycbcr->cr = cr;
++    ycbcr->ystride = ystride;
++    ycbcr->cstride = cstride;
++    ycbcr->chroma_step = 1;
++    return 0;
++}
++
+ int gralloc_unlock(gralloc_module_t const* /*module*/,
+         buffer_handle_t handle)
+ {

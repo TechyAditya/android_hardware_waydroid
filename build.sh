@@ -28,7 +28,7 @@ fetch https://gitlab.freedesktop.org/virgl/virglrenderer.git "$virgl_tag" \
 fetch https://gitlab.freedesktop.org/mesa/mesa.git "$mesa_tag" \
    "$build/mesa" "$here/patches/mesa-venus-vtest-android.patch"
 fetch https://android.googlesource.com/platform/hardware/libhardware android13-release \
-   "$build/libhardware" "$here/patches/gralloc-align-rows.patch"
+   "$build/libhardware" "$here/patches/gralloc-waydroid-venus.patch"
 
 ndk=${ANDROID_NDK:-$build/android-ndk-$ndk_version}
 if [ ! -d "$ndk" ]; then
