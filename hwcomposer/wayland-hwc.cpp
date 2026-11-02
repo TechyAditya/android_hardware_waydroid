@@ -173,18 +173,14 @@ finished_calibrating(struct display *d)
 
 void
 do_hotplug(struct display *display) {
+    display->width_padding = property_get_int32("persist.waydroid.width_padding", 0);
+    display->height_padding = property_get_int32("persist.waydroid.height_padding", 0);
     if (display->touch) {
-        char property[PROPERTY_VALUE_MAX];
-        int width = floor(display->width * display->scale);
-        int height = floor(display->height * display->scale);
-
-        if (property_get("persist.waydroid.width_padding", property, nullptr) > 0)
-            width -= atoi(property);
+        int width = floor(display->width * display->scale) - display->width_padding;
         std::string width_str = std::to_string(width);
         property_set("waydroid.display_width", width_str.c_str());
 
-        if (property_get("persist.waydroid.height_padding", property, nullptr) > 0)
-            height -= atoi(property);
+        int height = floor(display->height * display->scale) - display->height_padding;
         std::string height_str = std::to_string(height);
         property_set("waydroid.display_height", height_str.c_str());
 
@@ -410,11 +406,11 @@ void surface_context::set_crop(hwc_frect_t crop) {
                            wl_fixed_from_double(height));
 }
 
-void surface_context::set_display_frame(hwc_rect_t rect, double scale) {
+void surface_context::set_display_frame(hwc_rect_t rect, double scale_x, double scale_y) {
     assert(viewport);
 
-    int width = static_cast<int>(ceil((rect.right - rect.left) / scale));
-    int height = static_cast<int>(ceil((rect.bottom - rect.top) / scale));
+    int width = static_cast<int>(ceil((rect.right - rect.left) / scale_x));
+    int height = static_cast<int>(ceil((rect.bottom - rect.top) / scale_y));
 
     wp_viewport_set_destination(viewport,
                                 std::max(1, width),
@@ -961,10 +957,8 @@ pointer_handle_motion(void *data, struct wl_pointer *,
     }
     x = wl_fixed_to_int(sx);
     y = wl_fixed_to_int(sy);
-    if (display->scale != 1) {
-        x = int(x * display->scale);
-        y = int(y * display->scale);
-    }
+    x = int(x * effective_scale_x(display));
+    y = int(y * effective_scale_y(display));
     x += display->layers[display->pointer_surface].x;
     y += display->layers[display->pointer_surface].y;
 
@@ -1200,10 +1194,8 @@ touch_handle_down(void *data, struct wl_touch *,
     }
     x = wl_fixed_to_int(x_w);
     y = wl_fixed_to_int(y_w);
-    if (display->scale != 1) {
-        x = int(x * display->scale);
-        y = int(y * display->scale);
-    }
+    x = int(x * effective_scale_x(display));
+    y = int(y * effective_scale_y(display));
     x += display->layers[surface].x;
     y += display->layers[surface].y;
 
@@ -1272,10 +1264,8 @@ touch_handle_motion(void *data, struct wl_touch *,
         }
         x = wl_fixed_to_int(x_w);
         y = wl_fixed_to_int(y_w);
-        if (display->scale != 1) {
-            x = int(x * display->scale);
-            y = int(y * display->scale);
-        }
+        x = int(x * effective_scale_x(display));
+        y = int(y * effective_scale_y(display));
         x += display->layers[display->touch_surfaces[id]].x;
         y += display->layers[display->touch_surfaces[id]].y;
 
@@ -1740,10 +1730,8 @@ tablet_tool_motion(void *data, struct zwp_tablet_tool_v2 *,
         }
         x = wl_fixed_to_int(x_w);
         y = wl_fixed_to_int(y_w);
-        if (display->scale != 1) {
-            x = int(x * display->scale);
-            y = int(y * display->scale);
-        }
+        x = int(x * effective_scale_x(display));
+        y = int(y * effective_scale_y(display));
         x += display->layers[display->tablet_surface].x;
         y += display->layers[display->tablet_surface].y;
 

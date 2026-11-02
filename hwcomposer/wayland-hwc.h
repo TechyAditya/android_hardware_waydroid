@@ -168,7 +168,7 @@ struct surface_context {
     // Requires the transformed rectangle
     void set_crop(hwc_frect_t crop);
     // TODO: This should not require scale. Scaling handling is broken
-    void set_display_frame(hwc_rect_t rect, double scale);
+    void set_display_frame(hwc_rect_t rect, double scale_x, double scale_y);
 };
 
 struct window {
@@ -392,6 +392,12 @@ struct display {
     const hwc_procs_t *procs;
     bool needHotplug;
 
+    // Android pixels per surface unit while the last frame is stretched over a resized window
+    double content_scale_x;
+    double content_scale_y;
+    int width_padding;
+    int height_padding;
+
     // Experimental (persist.waydroid.resize_interval_ms): minimum time between resize hotplugs; 0 disables, 500 suggested
     int resize_interval_ms;
     std::mutex hotplug_mutex;
@@ -400,6 +406,16 @@ struct display {
     bool hotplug_thread_started;
     std::chrono::steady_clock::time_point last_hotplug;
 };
+
+static inline double
+effective_scale_x(const struct display *display) {
+    return display->resize_interval_ms > 0 ? display->content_scale_x : display->scale;
+}
+
+static inline double
+effective_scale_y(const struct display *display) {
+    return display->resize_interval_ms > 0 ? display->content_scale_y : display->scale;
+}
 
 void
 handle_relative_motion(void *data, struct zwp_relative_pointer_v1*,
