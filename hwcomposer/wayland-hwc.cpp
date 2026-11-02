@@ -52,6 +52,7 @@
 #include <syscall.h>
 #include <cmath>
 #include <algorithm>
+#include <thread>
 
 #include <libsync/sw_sync.h>
 #include <sync/sync.h>
@@ -199,6 +200,48 @@ do_hotplug(struct display *display) {
 }
 
 static void
+deferred_hotplug_thread(struct display *display) {
+    const auto interval = std::chrono::milliseconds(display->resize_interval_ms);
+    std::unique_lock lock(display->hotplug_mutex);
+    for (;;) {
+        display->hotplug_cv.wait(lock, [&]() { return display->hotplug_pending; });
+        if (display->hotplug_cv.wait_until(lock, display->last_hotplug + interval) == std::cv_status::no_timeout)
+            continue;
+        display->hotplug_pending = false;
+        display->last_hotplug = std::chrono::steady_clock::now();
+        lock.unlock();
+        do_hotplug(display);
+        lock.lock();
+    }
+}
+
+// Within resize_interval_ms of the last hotplug, defer to one trailing hotplug with the latest size
+static void
+request_hotplug(struct display *display) {
+    if (display->resize_interval_ms <= 0) {
+        do_hotplug(display);
+        return;
+    }
+
+    std::unique_lock lock(display->hotplug_mutex);
+    const auto now = std::chrono::steady_clock::now();
+    if (!display->hotplug_pending
+            && now - display->last_hotplug >= std::chrono::milliseconds(display->resize_interval_ms)) {
+        display->last_hotplug = now;
+        lock.unlock();
+        do_hotplug(display);
+        return;
+    }
+
+    display->hotplug_pending = true;
+    if (!display->hotplug_thread_started) {
+        std::thread(deferred_hotplug_thread, display).detach();
+        display->hotplug_thread_started = true;
+    }
+    display->hotplug_cv.notify_one();
+}
+
+static void
 xdg_toplevel_handle_configure(void *data, struct xdg_toplevel *,
                               int32_t width, int32_t height,
                               struct wl_array *)
@@ -222,7 +265,7 @@ xdg_toplevel_handle_configure(void *data, struct xdg_toplevel *,
         if (display->wm_base)
             xdg_surface_set_window_geometry(window->xdg_surface, 0, 0, display->width, display->height);
         if (display->width != old_width || display->height != old_height)
-            do_hotplug(display);
+            request_hotplug(display);
     }
 }
 
@@ -290,7 +333,7 @@ shell_surface_configure(void *data, struct wl_shell_surface *, uint32_t, int32_t
         int old_height = display->height;
         choose_width_height(display, width, height);
         if (display->width != old_width || display->height != old_height)
-            do_hotplug(display);
+            request_hotplug(display);
     }
 }
 
@@ -2106,6 +2149,9 @@ create_display(const char *gralloc)
     display->isMaximized = true;
     display->supports_cursor_viewport = true;
     display->supports_cursor_hw_buffer = property_get_bool("persist.waydroid.cursor_force_shm", false);
+    display->resize_interval_ms = property_get_int32("persist.waydroid.resize_interval_ms", 0);
+    display->hotplug_pending = false;
+    display->hotplug_thread_started = false;
     display->display = wl_display_connect(NULL);
     ALOGI("WAYLAND_DISPLAY: %s", getenv("WAYLAND_DISPLAY"));
     ALOGI("XDG_RUNTIME_DIR: %s", getenv("XDG_RUNTIME_DIR"));

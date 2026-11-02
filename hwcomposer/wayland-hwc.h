@@ -57,7 +57,10 @@
 #include <EGL/egl.h>
 #include <EGL/eglext.h>
 
+#include <chrono>
+#include <condition_variable>
 #include <functional>
+#include <mutex>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -388,6 +391,14 @@ struct display {
 
     const hwc_procs_t *procs;
     bool needHotplug;
+
+    // Experimental (persist.waydroid.resize_interval_ms): minimum time between resize hotplugs; 0 disables, 500 suggested
+    int resize_interval_ms;
+    std::mutex hotplug_mutex;
+    std::condition_variable hotplug_cv;
+    bool hotplug_pending;
+    bool hotplug_thread_started;
+    std::chrono::steady_clock::time_point last_hotplug;
 };
 
 void
