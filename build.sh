@@ -45,11 +45,21 @@ fi
 ninja -C "$build/virglrenderer/build" install
 
 ndk_bin=$ndk/toolchains/llvm/prebuilt/linux-x86_64/bin
-cat > "$build/android-x86_64.cross" <<EOF
+gralloc_src=$build/libhardware/modules/gralloc
+
+# Waydroid runs 64-bit and 32-bit processes, which load /vendor/lib64 and
+# /vendor/lib respectively.
+for abi in x86_64 x86; do
+   case $abi in
+   x86_64) triple=x86_64-linux-android lib=lib64 ;;
+   x86) triple=i686-linux-android lib=lib ;;
+   esac
+
+   cat > "$build/android-$abi.cross" <<EOF
 [binaries]
 ar = '$ndk_bin/llvm-ar'
-c = ['$ndk_bin/x86_64-linux-android$android_api-clang']
-cpp = ['$ndk_bin/x86_64-linux-android$android_api-clang++', '-fno-exceptions', '-fno-unwind-tables', '-fno-asynchronous-unwind-tables', '--start-no-unused-arguments', '-static-libstdc++', '--end-no-unused-arguments']
+c = ['$ndk_bin/$triple$android_api-clang']
+cpp = ['$ndk_bin/$triple$android_api-clang++', '-fno-exceptions', '-fno-unwind-tables', '-fno-asynchronous-unwind-tables', '--start-no-unused-arguments', '-static-libstdc++', '--end-no-unused-arguments']
 c_ld = 'lld'
 cpp_ld = 'lld'
 strip = '$ndk_bin/llvm-strip'
@@ -57,37 +67,39 @@ pkg-config = ['env', 'PKG_CONFIG_LIBDIR=/nonexistent', '/usr/bin/pkg-config']
 
 [host_machine]
 system = 'android'
-cpu_family = 'x86_64'
-cpu = 'x86_64'
+cpu_family = '$abi'
+cpu = '$abi'
 endian = 'little'
 EOF
 
-if [ ! -d "$build/mesa/build-android" ]; then
-   meson setup "$build/mesa/build-android" "$build/mesa" \
-      --cross-file "$build/android-x86_64.cross" \
-      -Dbuildtype=release -Db_ndebug=true \
-      -Dplatforms=android -Dplatform-sdk-version=$android_api \
-      -Dandroid-stub=true -Dandroid-libbacktrace=disabled \
-      -Dvulkan-drivers=virtio -Dgallium-drivers= -Dvulkan-layers= -Dtools= \
-      -Degl=disabled -Dgbm=disabled -Dglx=disabled -Dllvm=disabled \
-      -Dzstd=disabled -Dxmlconfig=disabled -Dvideo-codecs= \
-      -Dallow-fallback-for=libdrm -Dlibdrm:default_library=static
-fi
-ninja -C "$build/mesa/build-android" src/virtio/vulkan/libvulkan_virtio.so
-"$ndk_bin/llvm-strip" -o "$build/out/vulkan.virtio.so" \
-   "$build/mesa/build-android/src/virtio/vulkan/libvulkan_virtio.so"
+   mesa_build=$build/mesa/build-android-$abi
+   if [ ! -d "$mesa_build" ]; then
+      meson setup "$mesa_build" "$build/mesa" \
+         --cross-file "$build/android-$abi.cross" \
+         -Dbuildtype=release -Db_ndebug=true \
+         -Dplatforms=android -Dplatform-sdk-version=$android_api \
+         -Dandroid-stub=true -Dandroid-libbacktrace=disabled \
+         -Dvulkan-drivers=virtio -Dgallium-drivers= -Dvulkan-layers= -Dtools= \
+         -Degl=disabled -Dgbm=disabled -Dglx=disabled -Dllvm=disabled \
+         -Dzstd=disabled -Dxmlconfig=disabled -Dvideo-codecs= \
+         -Dallow-fallback-for=libdrm -Dlibdrm:default_library=static
+   fi
+   ninja -C "$mesa_build" src/virtio/vulkan/libvulkan_virtio.so
+   mkdir -p "$build/out/$lib"
+   "$ndk_bin/llvm-strip" -o "$build/out/$lib/vulkan.virtio.so" \
+      "$mesa_build/src/virtio/vulkan/libvulkan_virtio.so"
 
-# AOSP's default gralloc with NVIDIA-compatible row alignment.  It links
-# against the stub libraries from the Mesa build; Waydroid uses 4 KiB pages.
-gralloc_src=$build/libhardware/modules/gralloc
-"$ndk_bin/x86_64-linux-android$android_api-clang++" -shared -fPIC -O2 -std=c++17 \
-   -static-libstdc++ -DPAGE_SIZE=4096 -DLOG_TAG='"gralloc"' \
-   -I"$here/gralloc/include" -I"$build/mesa/include/android_stub" -I"$gralloc_src" \
-   -o "$build/out/gralloc.default.so" \
-   "$gralloc_src/gralloc.cpp" "$gralloc_src/mapper.cpp" "$here/gralloc/framebuffer_stub.cpp" \
-   -L"$build/mesa/build-android/src/android_stub" -lcutils -llog
-"$ndk_bin/llvm-strip" "$build/out/gralloc.default.so"
+   # AOSP's default gralloc with NVIDIA-compatible row alignment and YUV
+   # support.  It links against the stub libraries from the Mesa build;
+   # Waydroid uses 4 KiB pages.
+   "$ndk_bin/$triple$android_api-clang++" -shared -fPIC -O2 -std=c++17 \
+      -static-libstdc++ -DPAGE_SIZE=4096 -DLOG_TAG='"gralloc"' \
+      -I"$here/gralloc/include" -I"$build/mesa/include/android_stub" -I"$gralloc_src" \
+      -o "$build/out/$lib/gralloc.default.so" \
+      "$gralloc_src/gralloc.cpp" "$gralloc_src/mapper.cpp" "$here/gralloc/framebuffer_stub.cpp" \
+      -L"$mesa_build/src/android_stub" -lcutils -llog
+   "$ndk_bin/llvm-strip" "$build/out/$lib/gralloc.default.so"
+done
 
 echo "render server: $prefix/bin/virgl_test_server"
-echo "android driver: $build/out/vulkan.virtio.so"
-echo "android gralloc: $build/out/gralloc.default.so"
+echo "android libraries: $build/out/lib64 $build/out/lib"
