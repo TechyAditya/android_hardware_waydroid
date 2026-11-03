@@ -55,7 +55,7 @@ systemctl disable --now waydroid-venus.service waydroid-alloc.service 2> /dev/nu
 rm -f "$unit" /etc/systemd/system/waydroid-alloc.service
 systemctl daemon-reload
 # the directory is shared with other services' sockets
-rm -f "$socket_dir/vtest.sock"
+rm -f "$socket_dir/vtest.sock" "$socket_dir/alloc.sock"
 setfacl -x u:waydroid-venus "$socket_dir" 2> /dev/null || true
 rm -rf "$prefix" /var/cache/waydroid-venus
 rm -f "$sysusers"

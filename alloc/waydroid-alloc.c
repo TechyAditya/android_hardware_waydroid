@@ -112,6 +112,7 @@ allocate(const struct alloc_request *req, struct alloc_reply *reply)
    gbm_bo_destroy(bo);
    off_t size = lseek(fd, 0, SEEK_END);
    reply->size = size > 0 ? (uint64_t)size : 0;
+   lseek(fd, 0, SEEK_SET);
    return fd;
 }
 
