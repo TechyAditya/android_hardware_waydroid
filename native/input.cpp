@@ -420,7 +420,7 @@ void touch_up(void *, wl_touch *, uint32_t, uint32_t, int32_t id) {
     int index = touch_index(id);
     if (index < 0)
         return;
-    if (Window *w = live(s.touch_window)) {
+    if (Window *w = holder(s.touch_window)) {
         if (s.touch_moved) {
             send_touches(w, ACTION_MOVE);
             s.touch_moved = false;
@@ -448,7 +448,7 @@ void touch_frame(void *, wl_touch *) {
 }
 
 void touch_cancel(void *, wl_touch *) {
-    if (Window *w = live(s.touch_window); w && !s.touches.empty())
+    if (Window *w = holder(s.touch_window); w && !s.touches.empty())
         send_touches(w, ACTION_CANCEL);
     s.touches.clear();
     s.touch_moved = false;

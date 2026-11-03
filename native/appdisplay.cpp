@@ -755,7 +755,7 @@ void fence_ready(Window *w) {
     AImage *image = w->pending_image;
     w->pending_image = nullptr;
     Reader *r = reader_by_gen(w, w->pending_gen);
-    if (r && !r->retired)
+    if (r && !r->retired && !w->closing)
         present(w, r, image);
     else
         AImage_delete(image);
