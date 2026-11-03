@@ -21,6 +21,7 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <atomic>
 #include <climits>
 #include <cmath>
 
@@ -32,6 +33,17 @@
 Java java;
 
 namespace {
+// Set when a wake-up didn't fit in the pipe; the loop then rechecks every window.
+std::atomic<bool> g_lost_wakeup{false};
+int g_msg_w = -1;
+}
+
+void post(const Msg &msg) {
+    if (g_msg_w < 0 || write(g_msg_w, &msg, sizeof(msg)) != ssize_t(sizeof(msg)))
+        g_lost_wakeup.store(true);
+}
+
+namespace {
 
 constexpr int kImages = 4;
 constexpr int kDefaultWidth = 1280, kDefaultHeight = 800;
@@ -39,6 +51,8 @@ constexpr int64_t kTaskCheckDelayMs = 250;
 constexpr int64_t kTaskPollMs = 3000;
 constexpr int64_t kLaunchTimeoutMs = 20000;
 constexpr int64_t kScaleWaitMs = 250;
+// AndroidBridge.resizeDisplay() results
+enum : int { kResizeDone, kResizeRestored, kResizeBroken };
 constexpr int kGrallocMagic = 0x3141592;
 
 struct native_handle_layout {
@@ -152,7 +166,7 @@ wl_buffer *wrap_buffer(AHardwareBuffer *hb, BufEntry *entry) {
 // callback can race with the reader being deleted.
 void on_image(void *context, AImageReader *) {
     Msg msg{MSG_FRAME, uint32_t(uintptr_t(context)), 0, 0};
-    (void)!write(g.msg_w, &msg, sizeof(msg));
+    post(msg);
 }
 
 Reader *new_reader(Window *w, int width, int height) {
@@ -357,13 +371,20 @@ void do_resize(Window *w) {
         return;
     }
     jobject old_surface = old ? reader_surface(old) : nullptr;
-    bool ok = java.env->CallBooleanMethod(java.bridge, java.resizeDisplay, w->display, pw, ph, dpi, surface,
+    int result = java.env->CallIntMethod(java.bridge, java.resizeDisplay, w->display, pw, ph, dpi, surface,
             old_surface, w->display_w, w->display_h, w->dpi);
-    ok = java.check("resizeDisplay") && ok;
+    if (!java.check("resizeDisplay"))
+        result = kResizeBroken;
     java.env->DeleteLocalRef(surface);
     if (old_surface)
         java.env->DeleteLocalRef(old_surface);
-    if (!ok) {
+    if (result == kResizeBroken) {
+        // Either reader may still be the display's surface; release the display before either goes.
+        ALOGE("%s: display %d is in an unknown state after a failed resize", w->pkg.c_str(), w->display_id);
+        w->closing = true;
+        return;
+    }
+    if (result == kResizeRestored) {
         // The display still renders into the old reader at the old size; the next configure retries.
         r->retired = true;
         collect_readers(w);
@@ -802,6 +823,12 @@ int loop(const char *control_path) {
 
         if (fds[1].revents & POLLIN)
             drain_messages();
+        if (g_lost_wakeup.exchange(false)) {
+            for (auto &[id, w] : g.windows)
+                try_acquire(w.get());
+            g.tasks_dirty = true;
+            g.tasks_due = now_ms();
+        }
         if (fds[2].revents & POLLIN)
             serve_control();
         for (size_t i = 0; i < fence_windows.size(); i++) {
@@ -839,6 +866,8 @@ void disconnect(const char *control_path) {
         g.control = -1;
     }
     input_reset();
+    if (g.placeholder)
+        wl_buffer_destroy(g.placeholder);
     // Globals and seat devices are never destroyed one by one; they are unused from here on.
     wl_display_disconnect(g.display);
     g.display = nullptr;
@@ -848,8 +877,6 @@ void disconnect(const char *control_path) {
     g.wm_base = nullptr;
     g.viewporter = nullptr;
     g.fractional = nullptr;
-    if (g.placeholder)
-        wl_buffer_destroy(g.placeholder);
     g.placeholder = nullptr;
     g.shm_xbgr = false;
 }
@@ -862,8 +889,10 @@ int run(const char *runtime_dir, const char *wayland_display, const char *contro
             return 1;
         g.msg_r = pipefd[0];
         g.msg_w = pipefd[1];
-        // A full pipe would drop wake-ups; each message is 16 bytes, so this holds 65536.
-        fcntl(g.msg_w, F_SETPIPE_SZ, 1 << 20);
+        // Room for 65536 wake-ups; one that still doesn't fit sets g_lost_wakeup.
+        if (fcntl(g.msg_w, F_SETPIPE_SZ, 1 << 20) < 0)
+            ALOGW("can't enlarge the wake-up pipe: %s", strerror(errno));
+        g_msg_w = g.msg_w;
     }
     setenv("XDG_RUNTIME_DIR", runtime_dir, 1);
     setenv("WAYLAND_DISPLAY", wayland_display, 1);
@@ -938,10 +967,7 @@ extern "C" JNIEXPORT jboolean JNICALL Java_waydroid_appdisplay_Native_dropToSyst
 }
 
 extern "C" JNIEXPORT void JNICALL Java_waydroid_appdisplay_Native_post(JNIEnv *, jclass, jint what, jint arg) {
-    if (g.msg_w < 0)
-        return;
-    Msg msg{uint32_t(what), uint32_t(arg), 0, 0};
-    (void)!write(g.msg_w, &msg, sizeof(msg));
+    post(Msg{uint32_t(what), uint32_t(arg), 0, 0});
 }
 
 extern "C" JNIEXPORT jint JNICALL Java_waydroid_appdisplay_Native_run(JNIEnv *env, jclass, jobject bridge,
@@ -959,7 +985,7 @@ extern "C" JNIEXPORT jint JNICALL Java_waydroid_appdisplay_Native_run(JNIEnv *en
              "(Ljava/lang/String;IIILandroid/view/Surface;)Landroid/hardware/display/VirtualDisplay;"},
             {&java.displayId, "displayId", "(Landroid/hardware/display/VirtualDisplay;)I"},
             {&java.resizeDisplay, "resizeDisplay",
-             "(Landroid/hardware/display/VirtualDisplay;IIILandroid/view/Surface;Landroid/view/Surface;III)Z"},
+             "(Landroid/hardware/display/VirtualDisplay;IIILandroid/view/Surface;Landroid/view/Surface;III)I"},
             {&java.releaseDisplay, "releaseDisplay", "(Landroid/hardware/display/VirtualDisplay;)V"},
             {&java.launch, "launch", "(Ljava/lang/String;I)Z"},
             {&java.taskCount, "taskCount", "(I)I"},

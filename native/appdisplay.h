@@ -116,6 +116,8 @@ extern Java java;
 // Window lookup for input handlers, which only see wl_surfaces.
 Window *window_for_surface(wl_surface *surface);
 Window *window_by_id(uint32_t id);
+// Wakes the event loop; safe from any thread.
+void post(const Msg &msg);
 
 // Input (input.cpp)
 void input_bind_seat(wl_registry *registry, uint32_t name, uint32_t version);

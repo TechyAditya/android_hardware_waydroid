@@ -58,6 +58,7 @@ struct {
     int buttons = 0;
     bool pressed = false; // between ACTION_DOWN and ACTION_UP
     int64_t pointer_down = 0;
+    std::map<uint32_t, int64_t> side_keys; // BACK and FORWARD held through mouse buttons
     bool moved = false;
     double scroll_v = 0, scroll_h = 0;
     bool v120_v = false, v120_h = false;
@@ -108,6 +109,9 @@ void mouse_event(const Window *w, int action, int action_button = 0, float vscro
 
 // Ends a press that is still down, as when the pointer leaves or the window goes away.
 void end_press(const Window *w) {
+    for (auto &[key, down] : s.side_keys)
+        inject_key(w, KEY_ACTION_UP, key, 0, down);
+    s.side_keys.clear();
     if (!s.pressed)
         return;
     s.buttons = 0;
@@ -140,11 +144,12 @@ void pointer_enter(void *, wl_pointer *pointer, uint32_t serial, wl_surface *sur
 
 void pointer_leave(void *, wl_pointer *, uint32_t, wl_surface *) {
     if (Window *w = live(s.pointer_window)) {
-        if (s.pressed)
-            end_press(w);
-        else
+        bool was_pressed = s.pressed;
+        end_press(w);
+        if (!was_pressed)
             mouse_event(w, ACTION_HOVER_EXIT);
     }
+    s.side_keys.clear();
     s.pointer_window = 0;
     s.buttons = 0;
     s.pressed = false;
@@ -168,8 +173,15 @@ void pointer_button(void *, wl_pointer *, uint32_t, uint32_t, uint32_t button, u
     if (button == BTN_SIDE || button == BTN_EXTRA) {
         // Android's input reader turns these mouse buttons into BACK and FORWARD keys.
         uint32_t key = button == BTN_SIDE ? KEY_BACK : KEY_FORWARD;
-        int64_t now = now_ms();
-        inject_key(w, pressed ? KEY_ACTION_DOWN : KEY_ACTION_UP, key, 0, now);
+        auto held = s.side_keys.find(key);
+        if (pressed && held == s.side_keys.end()) {
+            int64_t now = now_ms();
+            s.side_keys[key] = now;
+            inject_key(w, KEY_ACTION_DOWN, key, 0, now);
+        } else if (!pressed && held != s.side_keys.end()) {
+            inject_key(w, KEY_ACTION_UP, key, 0, held->second);
+            s.side_keys.erase(held);
+        }
         return;
     }
     int b = button == BTN_LEFT ? BUTTON_PRIMARY : button == BTN_RIGHT ? BUTTON_SECONDARY
@@ -502,6 +514,7 @@ void input_forget_window(const Window *w) {
         s.pointer_window = 0;
         s.buttons = 0;
         s.pressed = false;
+        s.side_keys.clear();
     }
     if (s.key_window == w->id) {
         release_keys(w);
