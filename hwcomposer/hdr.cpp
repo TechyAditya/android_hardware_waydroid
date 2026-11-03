@@ -133,7 +133,6 @@ struct hdr_window_state {
     bool attached = false;
     bool used = false;
     std::vector<std::unique_ptr<frame_buffer>> buffers;
-    size_t next_buffer = 0;
     frame_source shown;
 };
 
@@ -276,8 +275,11 @@ const struct wp_color_management_output_v1_listener output_listener = {
     output_image_description_changed,
 };
 
-void video_description_failed(void *, struct wp_image_description_v1 *, uint32_t cause, const char *msg) {
+void video_description_failed(void *data, struct wp_image_description_v1 *description, uint32_t cause, const char *msg) {
     ALOGW("HDR: compositor refused a video image description (%u): %s", cause, msg);
+    // Never ready, so nothing else uses it
+    static_cast<video_description *>(data)->description = nullptr;
+    wp_image_description_v1_destroy(description);
 }
 void video_description_ready(void *data, struct wp_image_description_v1 *, uint32_t) {
     static_cast<video_description *>(data)->ready = true;
@@ -502,7 +504,7 @@ std::unique_ptr<buffer> create_rgb10_buffer(struct display *display, frame_buffe
     return buf;
 }
 
-// A released buffer of the size, else a new one, else the oldest one
+// A released buffer of the size, else a new one, else another released one, else none
 frame_buffer *next_frame_buffer(struct display *display, hdr_window_state *state, int width, int height) {
     constexpr size_t kMaxBuffers = 4;
     wl_display_dispatch_queue_pending(display->display, display->hdr->buffer_queue);
@@ -528,10 +530,8 @@ frame_buffer *next_frame_buffer(struct display *display, hdr_window_state *state
             }
         }
     }
-    if (!frame) {
-        // The compositor holds every buffer; overwrite the one sent longest ago
-        frame = state->buffers[state->next_buffer++ % state->buffers.size()].get();
-    }
+    if (!frame)
+        return nullptr;
 
     if (!frame->buf || !fits(*frame)) {
         frame->buf = create_rgb10_buffer(display, frame, width, height);
@@ -589,6 +589,11 @@ void hdr_init(struct display *display) {
     wl_display_roundtrip(display->display);
     if (!hdr->parametric || !contains(hdr->primaries, WP_COLOR_MANAGER_V1_PRIMARIES_BT2020)) {
         ALOGI("HDR: the compositor cannot take BT.2020 parametric image descriptions");
+        hdr->usable = false;
+        return;
+    }
+    if (!display->shm_xbgr2101010) {
+        ALOGI("HDR: the compositor cannot take 10-bit wl_shm buffers");
         hdr->usable = false;
         return;
     }
@@ -694,8 +699,13 @@ int hdr_apply_layer_to_window(waydroid_hwc_composer_device_1 *pdev, hwc_layer_1 
     }
 
     frame = next_frame_buffer(display, state, cv.out_width, cv.out_height);
-    if (!frame)
+    if (!frame) {
+        // The compositor holds every buffer, or none could be allocated: drop this frame and
+        // keep the one on screen
+        state->used = state->attached;
+        res = state->attached ? 0 : -1;
         goto out;
+    }
 
     {
         android::Rect bounds(cv.src_width, cv.src_height);

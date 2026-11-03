@@ -351,7 +351,7 @@ send_key_event(display *data, uint32_t key, wl_keyboard_key_state state);
 
 // Returns the decimal task id in ID, or -1. Ids come from layer names, and
 // std::stoi would abort the composer, which is built without exceptions.
-static int
+int
 parse_task_id(const std::string &id)
 {
     if (id.empty() || id.size() > 10 || id.find_first_not_of("0123456789") != std::string::npos)
@@ -1627,8 +1627,12 @@ output_handle_mode(void *data, struct wl_output *output,
                    int32_t refresh)
 {
     struct display *d = (struct display *)data;
-    if (flags & WL_OUTPUT_MODE_CURRENT)
+    if (flags & WL_OUTPUT_MODE_CURRENT) {
         refresh_output_mode(d, output, refresh);
+        // wl_output v1 has no done event to end the mode list
+        if (wl_output_get_version(output) < WL_OUTPUT_DONE_SINCE_VERSION)
+            refresh_output_done(d, output);
+    }
 
     // Fallback size
     // We can't do anything meaningful if there's more than one display, just pick one at random
@@ -2068,6 +2072,17 @@ static void add_tablet_seat(struct display *d) {
 }
 
 static void
+shm_handle_format(void *data, struct wl_shm *, uint32_t format)
+{
+    if (format == WL_SHM_FORMAT_XBGR2101010)
+        static_cast<struct display *>(data)->shm_xbgr2101010 = true;
+}
+
+static const struct wl_shm_listener shm_listener = {
+    shm_handle_format,
+};
+
+static void
 registry_handle_global(void *data, struct wl_registry *registry,
                uint32_t id, const char *interface, uint32_t version)
 {
@@ -2099,6 +2114,7 @@ registry_handle_global(void *data, struct wl_registry *registry,
     } else if (strcmp(interface, "wl_shm") == 0) {
 		d->shm = (struct wl_shm *)wl_registry_bind(registry, id,
                 &wl_shm_interface, 1);
+        wl_shm_add_listener(d->shm, &shm_listener, d);
     } else if (strcmp(interface, "wl_output") == 0) {
         d->output = (struct wl_output*)wl_registry_bind(registry, id,
                 &wl_output_interface, std::min(version, 3U));

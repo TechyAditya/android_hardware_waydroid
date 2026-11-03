@@ -336,6 +336,8 @@ struct display {
     struct wl_data_device *data_device;
     // Color management and the output's HDR capabilities, see hdr.cpp
     struct hdr_display_state *hdr;
+    // Whether wl_shm takes XBGR2101010, which the HDR video buffers use
+    bool shm_xbgr2101010;
 
     int system_version;
     GrallocType gtype;
@@ -471,3 +473,5 @@ struct display *
 create_display(const char* gralloc);
 void
 destroy_display(struct display *display);
+int
+parse_task_id(const std::string &id);
