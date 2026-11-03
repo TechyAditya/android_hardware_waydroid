@@ -4,13 +4,30 @@ Description=Venus render server for Waydroid (Android Vulkan on the host GPU)
 [Service]
 Environment=LD_LIBRARY_PATH=@PREFIX@/lib
 Environment=RENDER_SERVER_EXEC_PATH=@PREFIX@/libexec/virgl_render_server
+# The home directory is read-only, so NVIDIA caches shaders here.
+Environment=__GL_SHADER_DISK_CACHE_PATH=%C/waydroid-venus
+CacheDirectory=waydroid-venus
 ExecStartPre=/usr/bin/install -d -m 0755 %h/.local/share/waydroid/data/venus
 ExecStartPre=/usr/bin/rm -f %h/.local/share/waydroid/data/venus/vtest.sock
-# Android apps run under their own uids and must be able to connect.
-UMask=0000
 ExecStart=@PREFIX@/bin/virgl_test_server --venus --no-virgl --socket-path %h/.local/share/waydroid/data/venus/vtest.sock
+# Android apps run under their own uids and must be able to connect.
+ExecStartPost=/bin/sh -c 'until [ -S "$1" ]; do sleep 0.1; done; chmod 0666 "$1"' sh %h/.local/share/waydroid/data/venus/vtest.sock
 Restart=always
 RestartSec=1
+
+# Every Android app can send the server commands, so contain it.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=%h/.local/share/waydroid/data/venus
+PrivateTmp=yes
+RestrictAddressFamilies=AF_UNIX AF_NETLINK
+RestrictNamespaces=yes
+RestrictRealtime=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+TasksMax=1024
+MemoryMax=8G
 
 [Install]
 WantedBy=default.target
