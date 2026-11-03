@@ -1,5 +1,5 @@
 diff --git a/modules/gralloc/gralloc.cpp b/modules/gralloc/gralloc.cpp
-index 87bda97..e7ef620 100644
+index 87bda97..dab15d0 100644
 --- a/modules/gralloc/gralloc.cpp
 +++ b/modules/gralloc/gralloc.cpp
 @@ -26,6 +26,8 @@
@@ -31,7 +31,13 @@ index 87bda97..e7ef620 100644
      },
      .framebuffer = 0,
      .flags = 0,
-@@ -200,6 +208,9 @@ inline size_t align(size_t value, size_t alignment)
+@@ -195,56 +203,114 @@ static int gralloc_alloc_buffer(alloc_device_t* dev,
+ 
+ /*****************************************************************************/
+ 
+-inline size_t align(size_t value, size_t alignment)
++inline uint64_t align(uint64_t value, uint64_t alignment)
+ {
      return ((value + alignment - 1) / alignment) * alignment;
  }
  
@@ -41,8 +47,9 @@ index 87bda97..e7ef620 100644
  static int gralloc_alloc(alloc_device_t* dev,
          int width, int height, int format, int usage,
          buffer_handle_t* pHandle, int* pStride)
-@@ -207,44 +218,73 @@ static int gralloc_alloc(alloc_device_t* dev,
-     if (!pHandle || !pStride)
+ {
+-    if (!pHandle || !pStride)
++    if (!pHandle || !pStride || width <= 0 || height <= 0)
          return -EINVAL;
  
 -    int bytesPerPixel = 0;
@@ -64,6 +71,10 @@ index 87bda97..e7ef620 100644
 -            break;
 -        default:
 -            return -EINVAL;
++    // ashmem cannot keep protected content from the CPU.
++    if (usage & GRALLOC_USAGE_PROTECTED)
++        return -EINVAL;
++
 +    if (format == HAL_PIXEL_FORMAT_IMPLEMENTATION_DEFINED) {
 +        format = (usage & GRALLOC_USAGE_HW_CAMERA_WRITE)
 +                ? HAL_PIXEL_FORMAT_YCbCr_420_888
@@ -71,25 +82,38 @@ index 87bda97..e7ef620 100644
      }
  
 -    const size_t tileWidth = 2;
-     const size_t tileHeight = 2;
--
--    size_t stride = align(width, tileWidth);
--    size_t size = align(height, tileHeight) * stride * bytesPerPixel + 4;
--
--    int err;
--    if (usage & GRALLOC_USAGE_HW_FB) {
--        err = gralloc_alloc_framebuffer(dev, size, format, usage, pHandle);
-+    size_t stride, size;
+-    const size_t tileHeight = 2;
++    const uint64_t tileHeight = 2;
++    uint64_t stride, size;
 +    if (format == HAL_PIXEL_FORMAT_YV12 ||
 +            format == HAL_PIXEL_FORMAT_YCbCr_420_888) {
 +        // YV12 as Android defines it, which also serves as the flexible
 +        // YCbCr 4:2:0 layout through lock_ycbcr.
 +        stride = align(width, 64);
-+        const size_t cstride = align(stride / 2, 16);
++        const uint64_t cstride = align(stride / 2, 16);
 +        size = align(height, tileHeight) * (stride + cstride);
 +        format = HAL_PIXEL_FORMAT_YV12;
-     } else {
--        err = gralloc_alloc_buffer(dev, size, usage, pHandle);
++    } else {
++        // Venus imports gralloc buffers as images through Mesa's fallback
++        // gralloc, which knows only the 565, 8888, 1010102, FP16 and YUV
++        // formats.  The formats below are for the CPU, the camera or GPU
++        // data buffers only.
++        const int gpuImageUsage = GRALLOC_USAGE_HW_TEXTURE |
++                GRALLOC_USAGE_HW_RENDER | GRALLOC_USAGE_HW_COMPOSER |
++                GRALLOC_USAGE_HW_FB;
++        switch (format) {
++            case HAL_PIXEL_FORMAT_RGB_888:
++            case HAL_PIXEL_FORMAT_RAW16:
++            case HAL_PIXEL_FORMAT_Y16:
++            case HAL_PIXEL_FORMAT_Y8:
++            case kFormatR8:
++                if (usage & gpuImageUsage)
++                    return -EINVAL;
++                break;
++        }
+ 
+-    size_t stride = align(width, tileWidth);
+-    size_t size = align(height, tileHeight) * stride * bytesPerPixel + 4;
 +        int bytesPerPixel = 0;
 +        switch (format) {
 +            case HAL_PIXEL_FORMAT_RGBA_FP16:
@@ -118,16 +142,25 @@ index 87bda97..e7ef620 100644
 +                ALOGW("unsupported format 0x%x (usage 0x%x)", format, usage);
 +                return -EINVAL;
 +        }
-+
+ 
+-    int err;
+-    if (usage & GRALLOC_USAGE_HW_FB) {
+-        err = gralloc_alloc_framebuffer(dev, size, format, usage, pHandle);
+-    } else {
+-        err = gralloc_alloc_buffer(dev, size, usage, pHandle);
 +        // NVIDIA's Vulkan driver silently pads linear image rows to 128
 +        // bytes, so buffers shared with it must use that row alignment.
-+        const size_t tileWidth = 128 / std::gcd(size_t(128), size_t(bytesPerPixel));
++        const uint64_t tileWidth = 128 / std::gcd(uint64_t(128), uint64_t(bytesPerPixel));
 +        stride = align(width, tileWidth);
 +        size = align(height, tileHeight) * stride * bytesPerPixel + 4;
      }
  
 +    // Waydroid has no framebuffer device, so framebuffer usage gets a
 +    // regular buffer.
++    // ashmem sizes are ints, and 32-bit processes cannot map more anyway
++    if (size > INT_MAX - PAGE_SIZE)
++        return -ENOMEM;
++
 +    int err = gralloc_alloc_buffer(dev, size, usage, pHandle);
      if (err < 0) {
          return err;
@@ -169,15 +202,15 @@ index 2cd1007..c5cabc0 100644
          version = sizeof(native_handle);
          numInts = sNumInts();
 diff --git a/modules/gralloc/mapper.cpp b/modules/gralloc/mapper.cpp
-index ee3e40e..bd4db9b 100644
+index ee3e40e..d37eead 100644
 --- a/modules/gralloc/mapper.cpp
 +++ b/modules/gralloc/mapper.cpp
-@@ -175,6 +175,34 @@ int gralloc_lock(gralloc_module_t const* /*module*/,
+@@ -175,6 +175,37 @@ int gralloc_lock(gralloc_module_t const* /*module*/,
      return 0;
  }
  
 +int gralloc_lock_ycbcr(gralloc_module_t const* /*module*/,
-+        buffer_handle_t handle, int /*usage*/,
++        buffer_handle_t handle, int usage,
 +        int /*l*/, int /*t*/, int /*w*/, int /*h*/,
 +        struct android_ycbcr* ycbcr)
 +{
@@ -188,9 +221,12 @@ index ee3e40e..bd4db9b 100644
 +    if (hnd->format != HAL_PIXEL_FORMAT_YV12)
 +        return -EINVAL;
 +
++    // Without CPU usage, callers such as Mesa query the plane layout and
++    // expect the pointers to be offsets from NULL.
++    const bool cpu = usage & (GRALLOC_USAGE_SW_READ_MASK | GRALLOC_USAGE_SW_WRITE_MASK);
 +    const size_t ystride = hnd->stride;
 +    const size_t cstride = (ystride / 2 + 15) & ~size_t(15);
-+    uint8_t* y = (uint8_t*)hnd->base;
++    uint8_t* y = cpu ? (uint8_t*)hnd->base : nullptr;
 +    uint8_t* cr = y + ystride * hnd->height;
 +    uint8_t* cb = cr + cstride * (hnd->height / 2);
 +
