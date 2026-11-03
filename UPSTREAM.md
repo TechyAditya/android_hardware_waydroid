@@ -1,8 +1,8 @@
 # Upstream pull requests and issues
 
-What this fork plans to send to Waydroid, in plain words. Only #92 is open. Nothing else has been posted.
+What this fork plans to send to Waydroid, in plain words. Open so far: [#92](https://github.com/waydroid/android_hardware_waydroid/pull/92) and [android_vendor_waydroid#57](https://github.com/waydroid/android_vendor_waydroid/pull/57), with a reply posted on [#2464](https://github.com/waydroid/waydroid/issues/2464#issuecomment-6617138955). Nothing else has been posted.
 
-1. **Smoother window resizing, without the crash.** Dragging a window edge made Android rebuild its screen about 150 times in 8 seconds, and Android's graphics crashed during the rebuilds ([#2464](https://github.com/waydroid/waydroid/issues/2464)). [#92](https://github.com/waydroid/android_hardware_waydroid/pull/92) cuts the rebuilds to about 15 and stretches the old frame meanwhile. It is open. A second PR, in the vendor repository, adds the missing null check that SurfaceFlinger crashed on. After both are merged, ask the reporter to confirm that the SurfaceFlinger crash and the composer deaths are both gone, then close #2464. [Drafts](#1-resizing-and-the-surfaceflinger-crash)
+1. **Smoother window resizing, without the crash.** Dragging a window edge made Android rebuild its screen about 150 times in 8 seconds, and Android's graphics crashed during the rebuilds ([#2464](https://github.com/waydroid/waydroid/issues/2464)). [#92](https://github.com/waydroid/android_hardware_waydroid/pull/92) cuts the rebuilds to about 15 and stretches the old frame meanwhile. It is open. [android_vendor_waydroid#57](https://github.com/waydroid/android_vendor_waydroid/pull/57), also open, adds the missing null check that SurfaceFlinger crashed on. After both are merged, ask the reporter to confirm that the SurfaceFlinger crash and the composer deaths are both gone, then close #2464. [Drafts](#1-resizing-and-the-surfaceflinger-crash)
 2. **No more black flashes in the full Waydroid window.** The window was shown before Android finished drawing it. One PR. [Draft](#2-black-flashes-in-the-full-ui)
 3. **Several app windows behave.** Each window keeps its own size and closes with its app. Closing the full Waydroid window closes only its own apps. Android follows the monitor's refresh rate. One issue and one PR. [Drafts](#3-several-app-windows)
 4. **HDR video shows as HDR** when the compositor runs the monitor in HDR mode. One issue and two PRs, one in each repository. [Drafts](#4-hdr-video)
@@ -23,7 +23,7 @@ gh pr create -R waydroid/REPO -B lineage-20 -H TechyAditya:BRANCH --title "TITLE
 
 #2464 can close once both PRs are merged and the reporter confirms that both crashes are gone: the SurfaceFlinger SIGSEGV, and the composer deaths (SIGABRT, signal 13) after which SurfaceFlinger aborts. The SurfaceFlinger patch fixes the first. The composer deaths have no confirmed cause; #92 made them stop on this setup. So neither PR says "Fixes", which would close the issue on merge. Close it by hand after the reporter replies.
 
-### PR: SurfaceFlinger null check
+### PR: SurfaceFlinger null check (open as android_vendor_waydroid#57)
 
 `waydroid/android_vendor_waydroid`, head `TechyAditya:sf-default-display`. The branch adds `waydroid-patches/base-patches-33/frameworks/native/0016-surfaceflinger-Check-for-a-missing-default-display-i.patch`. All 16 patches apply to LineageOS `android_frameworks_native` `lineage-20.0` (`915ad642`). It has not been built in an AOSP tree. The 5-byte binary patch that `stack/surfaceflinger.sh` installs does the same thing and has run since 2026-11-02.
 
@@ -34,7 +34,7 @@ Addresses waydroid/waydroid#2464, together with waydroid/android_hardware_waydro
 
 ## Problem
 
-`SurfaceFlinger::getPhysicalDisplayIdsLocked()` calls `getDefaultDisplayDeviceLocked()->getPhysicalId()` without a check. Resizing a Waydroid window reconnects the primary display, and while it reconnects there is no default display. A `getPhysicalDisplayIds()` call in that gap, which DisplayManager makes after every reconnect, crashes SurfaceFlinger in `DisplayDevice::getId()`. That is the SIGSEGV in #2464, at `surfaceflinger + 0x1579f0`. AOSP has the same code up to `main`, because phones do not disconnect their primary display.
+`SurfaceFlinger::getPhysicalDisplayIdsLocked()` calls `getDefaultDisplayDeviceLocked()->getPhysicalId()` without a check. Resizing a Waydroid window reconnects the primary display, and while it reconnects there is no default display. A `getPhysicalDisplayIds()` call in that gap, which DisplayManager makes after every reconnect, crashes SurfaceFlinger in `DisplayDevice::getId()`. That is the SIGSEGV in waydroid/waydroid#2464, at `surfaceflinger + 0x1579f0`. AOSP has the same code up to `main`, because phones do not disconnect their primary display.
 
 ## Change
 
@@ -49,13 +49,13 @@ The patch applies after patches 0001 to 0015 on LineageOS `android_frameworks_na
 
 ### Comment: answer the reporter on #2464
 
-The reporter asked on 2026-11-03 whether to switch away from the Android 13 image. Post this after both PRs are open, so it can link them.
+Posted on 2026-11-04 as [this comment](https://github.com/waydroid/waydroid/issues/2464#issuecomment-6617138955). The reporter had asked on 2026-11-03 whether to switch away from the Android 13 image.
 
 ```markdown
 @CodeWithKhan07 No need to change images. The crash is in Android 13's SurfaceFlinger, and the LineageOS 20 images are the current x86_64 builds. Your report has two kinds of crash, and there is now a fix for each to try:
 
-1. The SurfaceFlinger SIGSEGV in `getPhysicalDisplayIds`. waydroid/android_vendor_waydroid#PR adds the missing null check. Until an image has it, step 3 of my comment installs the same check as a binary patch. That patch matches only the `20260927` system image, and yours is that image: `system_datetime = 1790512621` is 2026-09-27.
-2. The composer deaths (SIGABRT, and signal 13 at 10:37:16), after which SurfaceFlinger aborts. I could not find their cause, but they stopped for me with waydroid/android_hardware_waydroid#92 and `persist.waydroid.resize_interval_ms = 500` (step 2). Your Intel GPU uses `gralloc=gbm`, and the composer from #92 works with it.
+1. The SurfaceFlinger SIGSEGV in `getPhysicalDisplayIds`. waydroid/android_vendor_waydroid#57 adds the missing null check. Until an image has it, step 3 of my comment installs the same check as a binary patch. That patch matches only the `20260927` system image, and yours is that image: `system_datetime = 1790512621` is 2026-09-27.
+2. The composer deaths (SIGABRT, and signal 13 at 10:37:16), after which SurfaceFlinger aborts. I could not find their cause, but they stopped for me with waydroid/android_hardware_waydroid#92 and `persist.waydroid.resize_interval_ms = 500` (step 2). Your Intel GPU uses `gralloc=gbm`, and the composer from that PR works with it.
 
 Could you try both and say whether launching and resizing still crash? If either crash comes back, `coredumpctl list` and `waydroid logcat` around it would help. I only tested on Hyprland 0.57 with an NVIDIA GPU.
 ```
