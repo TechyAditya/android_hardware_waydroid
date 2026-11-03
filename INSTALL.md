@@ -137,7 +137,6 @@ waydroid session stop
 
 ## Known problems
 
-- Closing the `waydroid show-full-ui` window also closes the per-app windows.
 - 10-bit (HDR) video and VP8 video are decoded on the host, but the frames still pass through system memory, so they use more PCIe bandwidth than 8-bit H.264, VP9, and AV1 video.
 - The stack was tested only on an NVIDIA GPU.
 
