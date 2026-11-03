@@ -26,4 +26,6 @@ while IFS= read -r rel; do
     echo "installed vendor/$rel"
 done < <(cd "$dist" && find . -type f -printf '%P\n' | sort)
 
+"$HERE/surfaceflinger.sh" install
+
 echo "Restart Waydroid to load them: waydroid session stop"

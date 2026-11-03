@@ -63,6 +63,8 @@ The last step restarts Android, which closes every open Android app.
    sudo ./stack/install.sh
    ```
 
+   On the `20260927` x86_64 system image, this also installs a SurfaceFlinger with a null check for the resize crash in [waydroid/waydroid#2464](https://github.com/waydroid/waydroid/issues/2464). The patch changes 5 bytes and fits only that image, so on other images the script skips it and says so.
+
 3. Install the per-app window service and the `waydroid app launch` hook in `/usr/local/bin/waydroid`:
 
    ```sh
@@ -181,7 +183,7 @@ sudo ./waydroid-venus/install.sh && sudo ./stack/install.sh && sudo ./waydroid-a
 waydroid session stop
 ```
 
-After a Waydroid image update, run `stack/build.sh` and `sudo ./stack/install.sh` again, because the composer links against the image's libraries.
+After a Waydroid image update, run `stack/build.sh` and `sudo ./stack/install.sh` again, because the composer links against the image's libraries. The install also removes the patched SurfaceFlinger when the new system image no longer matches it, so the old binary cannot replace the new one.
 
 ## Uninstall
 

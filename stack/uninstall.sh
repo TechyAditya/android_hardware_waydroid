@@ -4,6 +4,8 @@
 set -euo pipefail
 
 [[ $EUID -eq 0 ]] || { echo "Run this with sudo." >&2; exit 1; }
+HERE=$(cd "$(dirname "$0")" && pwd)
+"$HERE/surfaceflinger.sh" uninstall
 overlay=/var/lib/waydroid/overlay/vendor
 backup=/var/lib/waydroid/all-fixes-backup
 [[ -f $backup/manifest ]] || { echo "Nothing to uninstall: $backup/manifest not found." >&2; exit 1; }
