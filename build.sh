@@ -5,7 +5,9 @@ set -euo pipefail
 
 here=$(cd "$(dirname "$0")" && pwd)
 build=$here/build
-prefix=${PREFIX:-$HOME/.local/lib/waydroid-venus}
+# install.sh copies the host build to /usr/local/lib/waydroid-venus
+prefix=/usr/local/lib/waydroid-venus
+host_out=$build/host
 
 # Mesa 26.0.8, the release in the Waydroid vendor image, so only the
 # patches differ; virglrenderer 1.3.0; AOSP android13-release.
@@ -64,7 +66,11 @@ if [ ! -d "$build/virglrenderer/build" ]; then
    meson setup "$build/virglrenderer/build" "$build/virglrenderer" \
       --prefix="$prefix" -Dbuildtype=release -Dvenus=true -Dvideo=false -Dtests=false
 fi
-ninja -C "$build/virglrenderer/build" install
+meson configure "$build/virglrenderer/build" --prefix="$prefix"
+rm -rf "$host_out" "$host_out.tmp"
+DESTDIR="$host_out.tmp" ninja -C "$build/virglrenderer/build" install
+mv "$host_out.tmp$prefix" "$host_out"
+rm -rf "$host_out.tmp"
 
 ndk_bin=$ndk/toolchains/llvm/prebuilt/linux-x86_64/bin
 gralloc_src=$build/libhardware/modules/gralloc
@@ -123,5 +129,5 @@ EOF
    "$ndk_bin/llvm-strip" "$build/out/$lib/gralloc.default.so"
 done
 
-echo "render server: $prefix/bin/virgl_test_server"
+echo "render server: $host_out/bin/virgl_test_server"
 echo "android libraries: $build/out/lib64 $build/out/lib"
