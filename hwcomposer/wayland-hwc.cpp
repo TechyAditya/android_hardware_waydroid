@@ -2353,8 +2353,14 @@ create_display(const char *gralloc)
     hdr_init(display);
     refresh_start(display);
 
-    if (display->resize_interval_ms > 0)
+    if (display->resize_interval_ms > 0) {
         display->hotplug_timer_fd = timerfd_create(CLOCK_MONOTONIC, TFD_NONBLOCK | TFD_CLOEXEC);
+        if (display->hotplug_timer_fd < 0) {
+            ALOGE("persist.waydroid.resize_interval_ms is off: timerfd_create failed: %s",
+                  strerror(errno));
+            display->resize_interval_ms = 0;
+        }
+    }
     if (pthread_create(&display->wayland_thread, nullptr, hwc_wayland_thread, display) != 0) {
         ALOGE("Couldn't create wayland thread");
         if (display->hotplug_timer_fd >= 0)

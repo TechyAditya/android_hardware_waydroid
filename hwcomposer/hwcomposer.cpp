@@ -972,8 +972,10 @@ std::unique_ptr<buffer> wl_cursor_cursor_handler::create_buffer(waydroid_hwc_com
 
 void wl_cursor_cursor_handler::set_cursor(display* display) const {
     assert(display->pointer);
-    double scale_x, scale_y;
-    effective_scale(display, &scale_x, &scale_y);
+    // Without a viewport the cursor buffer keeps the display scale, so its hotspot does too
+    double scale_x = display->scale, scale_y = display->scale;
+    if (cursor_surface_context.viewport)
+        effective_scale(display, &scale_x, &scale_y);
     wl_pointer_set_cursor (display->pointer, display->pointer_enter_serial,
                           cursor_surface_context.surface,
                           round(display->cursor_hotspot.x / scale_x),
