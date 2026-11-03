@@ -210,19 +210,18 @@ Each fix also has its own branch on `TechyAditya/android_hardware_waydroid`, for
 
 | Fix | Branch |
 | --- | --- |
-| Single-window display size, window lifetime, and focus | `pr/single-window` |
-| A display config for each monitor refresh rate | `pr/refresh-rates` |
+| Several app windows: single-window size, lifetime, and focus, closing the full UI, and per-monitor refresh rates | `pr/multi-window` |
 | HDR video on HDR outputs | `pr/hdr-output` |
 | Present gralloc buffers in GPU memory as dma-bufs | `pr/gpu-memory-dmabuf` |
-| Closing the full UI closes only its own apps | `pr/full-ui-close`, on top of `pr/single-window` |
 | Rate-limited resize hotplugs and cursor scale | `resize-interval` ([waydroid/android_hardware_waydroid#92](https://github.com/waydroid/android_hardware_waydroid/pull/92)) |
 | Full UI frames copied before Android finished drawing them | `shm-copy-fence` |
 | Audio HAL sample rate and float output | `audio-rate-buffer` |
-| The first four rows together | `single-window-focus` |
+| Single-window fixes, HDR, GPU-memory buffers, and refresh rates together | `single-window-focus` |
 
-Two parts live in other repositories:
+Three parts live in other repositories:
 
 | Fix | Repository and branch |
 | --- | --- |
 | HDR passthrough in the HWC2-on-HWC1 adapter | `TechyAditya/android_vendor_waydroid` `hdr` |
+| SurfaceFlinger null check for the resize crash ([waydroid/waydroid#2464](https://github.com/waydroid/waydroid/issues/2464)) | `TechyAditya/android_vendor_waydroid` `sf-default-display` |
 | Venus, the allocator, and the video decoder | `TechyAditya/waydroid-venus` `master` |

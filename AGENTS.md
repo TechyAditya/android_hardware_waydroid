@@ -7,7 +7,8 @@ Waydroid (LineageOS 20, Android 13) on an NVIDIA host: composer, audio HAL, Venu
 `all-fixes` integrates everything. Every change also lives on one upstream-shaped branch, and the change lands there first:
 
 - `pr/*`, `shm-copy-fence`, `audio-rate-buffer` and `resize-interval` each start from upstream `lineage-20` (remote `origin`) and hold one change. `resize-interval` is the head of upstream PR #92, so a push to it updates the PR.
-- `single-window-focus` combines `pr/single-window`, `pr/hdr-output`, `pr/gpu-memory-dmabuf` and `pr/refresh-rates`.
+- `pr/multi-window` is the upstream branch for the single-window, full UI close and refresh rate commits. `single-window-focus` combines those single-window and refresh rate commits with `pr/hdr-output` and `pr/gpu-memory-dmabuf`.
+- SurfaceFlinger changes are patch files in `TechyAditya/android_vendor_waydroid`, under `waydroid-patches/base-patches-33/frameworks/native/`. Make one with `git format-patch` on LineageOS `android_frameworks_native` `lineage-20.0`, after `git am` of the existing patches, so it applies in order. `stack/surfaceflinger.sh` ships the resize-crash fix as a binary patch until an image has it.
 - `waydroid-venus/` is a `git subtree` of `TechyAditya/waydroid-venus` `master`, checked out at `~/Code/waydroid-venus`. Commit there, then run `git subtree pull --prefix=waydroid-venus ~/Code/waydroid-venus master` here. Commit or stash local edits first, because the pull refuses a dirty tree.
 - `waydroid-app-displays/` stays in this fork. Keep its name out of `pr/*` commits, comments, and drafts.
 
