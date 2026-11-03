@@ -246,6 +246,8 @@ Reader *reader_by_gen(Window *w, uint32_t gen) {
 }
 
 void try_acquire(Window *w) {
+    if (w->closing)
+        return;
     if (w->pending_image) {
         w->frame_waiting = true;
         return;
@@ -321,6 +323,8 @@ void target_size(const Window *w, int *pw, int *ph, int *dpi) {
 }
 
 void start_display(Window *w) {
+    if (w->closing)
+        return;
     int pw, ph, dpi;
     target_size(w, &pw, &ph, &dpi);
     Reader *r = new_reader(w, pw, ph);
@@ -356,6 +360,8 @@ void start_display(Window *w) {
 
 void do_resize(Window *w) {
     w->resize_pending = false;
+    if (w->closing)
+        return;
     int pw, ph, dpi;
     target_size(w, &pw, &ph, &dpi);
     if (!w->display || (pw == w->display_w && ph == w->display_h && dpi == w->dpi))
@@ -409,7 +415,7 @@ void do_resize(Window *w) {
 
 // Resizes right away or, within resize_interval_ms of the last resize, once the interval is up.
 void schedule_resize(Window *w, bool immediate) {
-    if (!w->display)
+    if (!w->display || w->closing)
         return;
     int pw, ph, dpi;
     target_size(w, &pw, &ph, &dpi);
@@ -879,6 +885,9 @@ void disconnect(const char *control_path) {
     g.fractional = nullptr;
     g.placeholder = nullptr;
     g.shm_xbgr = false;
+    // A new connection may come with other outputs and scales.
+    g.base_scale120 = 0;
+    g.last_scale120 = 120;
 }
 
 int run(const char *runtime_dir, const char *wayland_display, const char *control_path) {
