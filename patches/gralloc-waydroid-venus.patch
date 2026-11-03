@@ -1,5 +1,5 @@
 diff --git a/modules/gralloc/gralloc.cpp b/modules/gralloc/gralloc.cpp
-index 87bda97..3bc61f4 100644
+index 87bda97..5efdd6e 100644
 --- a/modules/gralloc/gralloc.cpp
 +++ b/modules/gralloc/gralloc.cpp
 @@ -22,10 +22,14 @@
@@ -55,7 +55,7 @@ index 87bda97..3bc61f4 100644
          }
      }
      
-@@ -195,56 +209,222 @@ static int gralloc_alloc_buffer(alloc_device_t* dev,
+@@ -195,56 +209,224 @@ static int gralloc_alloc_buffer(alloc_device_t* dev,
  
  /*****************************************************************************/
  
@@ -190,10 +190,12 @@ index 87bda97..3bc61f4 100644
  
 -    size_t stride = align(width, tileWidth);
 -    size_t size = align(height, tileHeight) * stride * bytesPerPixel + 4;
-+    // GPU-only render targets, such as app windows and displays, go in GPU
-+    // memory.  Anything the CPU, the framebuffer target's copy, an encoder
-+    // or a camera reads stays in system memory.
-+    const int gpuMemoryUsage = GRALLOC_USAGE_PRIVATE_0 | GRALLOC_USAGE_HW_RENDER;
++    // GPU-only buffers, such as app windows, displays and hardware bitmaps,
++    // which the GPU uploads and then samples every frame, go in GPU memory.
++    // Anything the CPU, the framebuffer target's copy, an encoder or a camera
++    // reads stays in system memory.
++    const int gpuMemoryUsage = GRALLOC_USAGE_PRIVATE_0 | GRALLOC_USAGE_HW_RENDER |
++            GRALLOC_USAGE_HW_TEXTURE;
 +    const int systemMemoryUsage = GRALLOC_USAGE_SW_READ_MASK | GRALLOC_USAGE_SW_WRITE_MASK |
 +            GRALLOC_USAGE_HW_FB | GRALLOC_USAGE_HW_VIDEO_ENCODER | GRALLOC_USAGE_HW_CAMERA_MASK;
 +    // Video frames are flexible YCbCr 4:2:0 that only the host decoder
