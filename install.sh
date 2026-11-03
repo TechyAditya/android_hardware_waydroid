@@ -19,9 +19,17 @@ for file in "$out/appdisplay.jar" "$out/libappdisplay.so"; do
    [ -f "$file" ] || { echo "missing $file; run build.sh first" >&2; exit 1; }
 done
 [ -d "$home/.local/share/waydroid/data" ] || { echo "Waydroid isn't initialized for $user" >&2; exit 1; }
-if [ -e "$hook" ] && ! grep -q waydroid-app-displays "$hook"; then
-   echo "$hook exists and isn't ours; not replacing it" >&2
-   exit 1
+# Only replace a hook this script installed. The first release had no marker line; its
+# second line identifies it.
+if [ -e "$hook" ]; then
+   case "$(sed -n 2p "$hook")" in
+      "# managed-by: waydroid-app-displays" | \
+      "# Installed ahead of /usr/bin/waydroid: \`waydroid app launch PACKAGE\`, which Waydroid's") ;;
+      *)
+         echo "$hook exists and isn't ours; not replacing it" >&2
+         exit 1
+         ;;
+   esac
 fi
 
 # Android's system user is the host user, so the files and control socket belong to them.

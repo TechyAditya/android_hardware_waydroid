@@ -112,13 +112,28 @@ final class AndroidBridge {
         return display.getDisplay().getDisplayId();
     }
 
-    void resizeDisplay(VirtualDisplay display, int width, int height, int dpi, Surface surface) {
+    /** Returns false, with the display still on its old size and surface, if Android refused. */
+    boolean resizeDisplay(VirtualDisplay display, int width, int height, int dpi, Surface surface,
+            Surface oldSurface, int oldWidth, int oldHeight, int oldDpi) {
         try {
             display.resize(width, height, dpi);
-            display.setSurface(surface);
         } catch (Throwable t) {
             Log.e(TAG, "resizing display " + displayId(display) + " failed", t);
+            return false;
         }
+        try {
+            display.setSurface(surface);
+            return true;
+        } catch (Throwable t) {
+            Log.e(TAG, "switching display " + displayId(display) + " to its resized surface failed", t);
+        }
+        try {
+            display.resize(oldWidth, oldHeight, oldDpi);
+            display.setSurface(oldSurface);
+        } catch (Throwable t) {
+            Log.e(TAG, "restoring display " + displayId(display) + " failed", t);
+        }
+        return false;
     }
 
     void releaseDisplay(VirtualDisplay display) {

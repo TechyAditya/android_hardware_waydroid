@@ -38,6 +38,7 @@ constexpr int kDefaultWidth = 1280, kDefaultHeight = 800;
 constexpr int64_t kTaskCheckDelayMs = 250;
 constexpr int64_t kTaskPollMs = 3000;
 constexpr int64_t kLaunchTimeoutMs = 20000;
+constexpr int64_t kScaleWaitMs = 250;
 constexpr int kGrallocMagic = 0x3141592;
 
 struct native_handle_layout {
@@ -217,7 +218,10 @@ void collect_readers(Window *w) {
 }
 
 Reader *current_reader(Window *w) {
-    return w->readers.empty() || w->readers.back()->retired ? nullptr : w->readers.back().get();
+    for (auto it = w->readers.rbegin(); it != w->readers.rend(); ++it)
+        if (!(*it)->retired)
+            return it->get();
+    return nullptr;
 }
 
 Reader *reader_by_gen(Window *w, uint32_t gen) {
@@ -352,9 +356,19 @@ void do_resize(Window *w) {
         }
         return;
     }
-    java.env->CallVoidMethod(java.bridge, java.resizeDisplay, w->display, pw, ph, dpi, surface);
+    jobject old_surface = old ? reader_surface(old) : nullptr;
+    bool ok = java.env->CallBooleanMethod(java.bridge, java.resizeDisplay, w->display, pw, ph, dpi, surface,
+            old_surface, w->display_w, w->display_h, w->dpi);
+    ok = java.check("resizeDisplay") && ok;
     java.env->DeleteLocalRef(surface);
-    java.check("resizeDisplay");
+    if (old_surface)
+        java.env->DeleteLocalRef(old_surface);
+    if (!ok) {
+        // The display still renders into the old reader at the old size; the next configure retries.
+        r->retired = true;
+        collect_readers(w);
+        return;
+    }
     if (old) {
         old->retired = true;
         if (w->pending_image && w->pending_gen == old->gen) {
@@ -401,6 +415,11 @@ void fractional_preferred_scale(void *data, wp_fractional_scale_v1 *, uint32_t s
         g.base_scale120 = int(scale);
     g.last_scale120 = int(scale);
     w->scale120 = int(scale);
+    if (w->start_pending) {
+        w->start_pending = false;
+        start_display(w);
+        return;
+    }
     schedule_resize(w, true);
 }
 const wp_fractional_scale_v1_listener fractional_listener = {fractional_preferred_scale};
@@ -440,10 +459,16 @@ void xsurface_configure(void *data, xdg_surface *xs, uint32_t serial) {
     set_destination(w);
     wl_surface_commit(w->surface);
 
-    if (first)
+    if (first && g.fractional && !w->scale120) {
+        // The compositor sends the window's own scale once it is mapped; sizing the display
+        // before that would use another window's.
+        w->start_pending = true;
+        w->start_due = now_ms() + kScaleWaitMs;
+    } else if (first) {
         start_display(w);
-    else
+    } else {
         schedule_resize(w, false);
+    }
 }
 const xdg_surface_listener xsurface_listener = {xsurface_configure};
 
@@ -476,7 +501,7 @@ Window *create_window(const std::string &pkg, const std::string &title) {
 
 void destroy_window(Window *w) {
     ALOGI("%s: closing display %d", w->pkg.c_str(), w->display_id);
-    input_forget_window(w->id);
+    input_forget_window(w);
     if (w->display_id >= 0) {
         java.env->CallVoidMethod(java.bridge, java.removeTasks, w->display_id);
         java.check("removeTasks");
@@ -487,6 +512,9 @@ void destroy_window(Window *w) {
         java.env->DeleteGlobalRef(w->display);
         w->display = nullptr;
     }
+    // Detach first, so no buffer is destroyed while it is still the surface's content.
+    wl_surface_attach(w->surface, nullptr, 0, 0);
+    wl_surface_commit(w->surface);
     for (auto &r : w->readers)
         free_reader(w, r.get());
     w->readers.clear();
@@ -552,6 +580,8 @@ std::string handle_command(const std::string &line) {
         return "ok\n";
     }
     if (cmd == "close") {
+        if (!valid_pkg(pkg))
+            return "error invalid package\n";
         if (Window *w = window_for_pkg(pkg)) {
             w->closing = true;
             return "ok\n";
@@ -585,7 +615,12 @@ void serve_control() {
     }
     line = line.substr(0, line.find('\n'));
     std::string reply = handle_command(line);
-    (void)!write(fd, reply.data(), reply.size());
+    for (size_t off = 0; off < reply.size();) {
+        ssize_t n = write(fd, reply.data() + off, reply.size() - off);
+        if (n <= 0)
+            break;
+        off += size_t(n);
+    }
     close(fd);
 }
 
@@ -651,8 +686,12 @@ const wl_registry_listener registry_listener = {registry_global, registry_remove
 
 wl_buffer *make_placeholder() {
     int fd = memfd_create("placeholder", MFD_CLOEXEC);
-    if (fd < 0 || ftruncate(fd, 4) < 0)
+    if (fd < 0)
         return nullptr;
+    if (ftruncate(fd, 4) < 0) {
+        close(fd);
+        return nullptr;
+    }
     uint32_t black = 0xff000000;
     (void)!pwrite(fd, &black, sizeof(black), 0);
     wl_shm_pool *pool = wl_shm_create_pool(g.shm, fd, 4);
@@ -716,9 +755,12 @@ int loop(const char *control_path) {
         int64_t due = g.next_task_poll;
         if (g.tasks_dirty)
             due = std::min(due, g.tasks_due);
-        for (auto &[id, w] : g.windows)
+        for (auto &[id, w] : g.windows) {
             if (w->resize_pending)
                 due = std::min(due, w->resize_due);
+            if (w->start_pending)
+                due = std::min(due, w->start_due);
+        }
         due = std::min(due, input_next_deadline());
         int timeout = int(std::clamp<int64_t>(due - now, 0, 60000));
 
@@ -771,9 +813,14 @@ int loop(const char *control_path) {
         }
 
         now = now_ms();
-        for (auto &[id, w] : g.windows)
+        for (auto &[id, w] : g.windows) {
             if (w->resize_pending && now >= w->resize_due)
                 do_resize(w.get());
+            if (w->start_pending && now >= w->start_due) {
+                w->start_pending = false;
+                start_display(w.get());
+            }
+        }
         input_run_timers(now);
         if ((g.tasks_dirty && now >= g.tasks_due) || now >= g.next_task_poll) {
             g.tasks_dirty = false;
@@ -801,6 +848,8 @@ void disconnect(const char *control_path) {
     g.wm_base = nullptr;
     g.viewporter = nullptr;
     g.fractional = nullptr;
+    if (g.placeholder)
+        wl_buffer_destroy(g.placeholder);
     g.placeholder = nullptr;
     g.shm_xbgr = false;
 }
@@ -813,6 +862,8 @@ int run(const char *runtime_dir, const char *wayland_display, const char *contro
             return 1;
         g.msg_r = pipefd[0];
         g.msg_w = pipefd[1];
+        // A full pipe would drop wake-ups; each message is 16 bytes, so this holds 65536.
+        fcntl(g.msg_w, F_SETPIPE_SZ, 1 << 20);
     }
     setenv("XDG_RUNTIME_DIR", runtime_dir, 1);
     setenv("WAYLAND_DISPLAY", wayland_display, 1);
@@ -907,7 +958,8 @@ extern "C" JNIEXPORT jint JNICALL Java_waydroid_appdisplay_Native_run(JNIEnv *en
             {&java.createDisplay, "createDisplay",
              "(Ljava/lang/String;IIILandroid/view/Surface;)Landroid/hardware/display/VirtualDisplay;"},
             {&java.displayId, "displayId", "(Landroid/hardware/display/VirtualDisplay;)I"},
-            {&java.resizeDisplay, "resizeDisplay", "(Landroid/hardware/display/VirtualDisplay;IIILandroid/view/Surface;)V"},
+            {&java.resizeDisplay, "resizeDisplay",
+             "(Landroid/hardware/display/VirtualDisplay;IIILandroid/view/Surface;Landroid/view/Surface;III)Z"},
             {&java.releaseDisplay, "releaseDisplay", "(Landroid/hardware/display/VirtualDisplay;)V"},
             {&java.launch, "launch", "(Ljava/lang/String;I)Z"},
             {&java.taskCount, "taskCount", "(I)I"},

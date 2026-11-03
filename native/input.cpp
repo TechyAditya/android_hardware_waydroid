@@ -56,6 +56,7 @@ struct {
     uint32_t pointer_window = 0;
     double px = 0, py = 0;
     int buttons = 0;
+    bool pressed = false; // between ACTION_DOWN and ACTION_UP
     int64_t pointer_down = 0;
     bool moved = false;
     double scroll_v = 0, scroll_h = 0;
@@ -101,8 +102,17 @@ void mouse_event(const Window *w, int action, int action_button = 0, float vscro
     float xy[2];
     window_to_display(w, s.px, s.py, &xy[0], &xy[1]);
     const int id = 0;
-    int64_t down = s.buttons ? s.pointer_down : now_ms();
+    int64_t down = s.pressed ? s.pointer_down : now_ms();
     inject_motion(w, action, action_button, s.buttons, SOURCE_MOUSE, 1, &id, xy, vscroll, hscroll, down);
+}
+
+// Ends a press that is still down, as when the pointer leaves or the window goes away.
+void end_press(const Window *w) {
+    if (!s.pressed)
+        return;
+    s.buttons = 0;
+    mouse_event(w, ACTION_UP);
+    s.pressed = false;
 }
 
 void flush_motion(Window *w) {
@@ -122,6 +132,7 @@ void pointer_enter(void *, wl_pointer *pointer, uint32_t serial, wl_surface *sur
     s.px = wl_fixed_to_double(x);
     s.py = wl_fixed_to_double(y);
     s.buttons = 0;
+    s.pressed = false;
     s.moved = false;
     if ((w = live(s.pointer_window)))
         mouse_event(w, ACTION_HOVER_ENTER);
@@ -129,15 +140,14 @@ void pointer_enter(void *, wl_pointer *pointer, uint32_t serial, wl_surface *sur
 
 void pointer_leave(void *, wl_pointer *, uint32_t, wl_surface *) {
     if (Window *w = live(s.pointer_window)) {
-        if (s.buttons) {
-            s.buttons = 0;
-            mouse_event(w, ACTION_UP);
-        } else {
+        if (s.pressed)
+            end_press(w);
+        else
             mouse_event(w, ACTION_HOVER_EXIT);
-        }
     }
     s.pointer_window = 0;
     s.buttons = 0;
+    s.pressed = false;
 }
 
 void pointer_motion(void *, wl_pointer *, uint32_t, wl_fixed_t x, wl_fixed_t y) {
@@ -169,8 +179,9 @@ void pointer_button(void *, wl_pointer *, uint32_t, uint32_t, uint32_t button, u
     if (pressed) {
         if (s.buttons & b)
             return;
-        if (!s.buttons) {
+        if (!s.pressed) {
             s.pointer_down = now_ms();
+            s.pressed = true;
             s.buttons = b;
             mouse_event(w, ACTION_DOWN);
         } else {
@@ -182,8 +193,10 @@ void pointer_button(void *, wl_pointer *, uint32_t, uint32_t, uint32_t button, u
             return;
         s.buttons &= ~b;
         mouse_event(w, ACTION_BUTTON_RELEASE, b);
-        if (!s.buttons)
+        if (!s.buttons) {
             mouse_event(w, ACTION_UP);
+            s.pressed = false;
+        }
     }
 }
 
@@ -253,9 +266,8 @@ bool is_modifier(uint32_t key) {
     }
 }
 
-void release_keys() {
-    Window *w = live(s.key_window);
-    if (w)
+void release_keys(const Window *w) {
+    if (w && w->display_id >= 0)
         for (auto &[key, down] : s.keys_down)
             inject_key(w, KEY_ACTION_UP, key, 0, down);
     s.keys_down.clear();
@@ -278,7 +290,7 @@ void keyboard_enter(void *, wl_keyboard *, uint32_t, wl_surface *surface, wl_arr
 }
 
 void keyboard_leave(void *, wl_keyboard *, uint32_t, wl_surface *) {
-    release_keys();
+    release_keys(live(s.key_window));
     s.key_window = 0;
 }
 
@@ -446,7 +458,7 @@ void seat_capabilities(void *, wl_seat *seat, uint32_t caps) {
         s.keyboard = wl_seat_get_keyboard(seat);
         wl_keyboard_add_listener(s.keyboard, &keyboard_listener, nullptr);
     } else if (!want_keyboard && s.keyboard) {
-        release_keys();
+        release_keys(live(s.key_window));
         wl_keyboard_release(s.keyboard);
         s.keyboard = nullptr;
         s.key_window = 0;
@@ -482,17 +494,22 @@ void input_set_cursor_shape_manager(wp_cursor_shape_manager_v1 *manager) {
     s.shapes = manager;
 }
 
-void input_forget_window(uint32_t id) {
-    if (s.pointer_window == id) {
+void input_forget_window(const Window *w) {
+    bool display = w->display_id >= 0;
+    if (s.pointer_window == w->id) {
+        if (display)
+            end_press(w);
         s.pointer_window = 0;
         s.buttons = 0;
+        s.pressed = false;
     }
-    if (s.key_window == id) {
-        s.keys_down.clear();
-        s.repeat_key = 0;
+    if (s.key_window == w->id) {
+        release_keys(w);
         s.key_window = 0;
     }
-    if (s.touch_window == id) {
+    if (s.touch_window == w->id) {
+        if (display && !s.touches.empty())
+            send_touches(w, ACTION_CANCEL);
         s.touches.clear();
         s.touch_window = 0;
     }

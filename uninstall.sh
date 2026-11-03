@@ -9,8 +9,12 @@ hook=/usr/local/bin/waydroid
 if waydroid status 2> /dev/null | grep -q $'^Container:\tRUNNING'; then
    waydroid shell -- sh -c 'pid=$(pidof waydroid-app-displays) && kill $pid' || true
 fi
-if [ -e "$hook" ] && grep -q waydroid-app-displays "$hook"; then
-   rm -f "$hook"
+if [ -e "$hook" ]; then
+   case "$(sed -n 2p "$hook")" in
+      "# managed-by: waydroid-app-displays" | \
+      "# Installed ahead of /usr/bin/waydroid: \`waydroid app launch PACKAGE\`, which Waydroid's")
+         rm -f "$hook" ;;
+   esac
 fi
 rm -rf /usr/local/lib/waydroid-app-displays
 rm -f /var/lib/waydroid/overlay/vendor/etc/init/waydroid-app-displays.rc

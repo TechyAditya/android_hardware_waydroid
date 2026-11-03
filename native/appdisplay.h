@@ -91,6 +91,9 @@ struct Window {
     int64_t resize_due = 0;
     int64_t last_resize = 0;
 
+    bool start_pending = false; // configured, waiting for the window's own scale
+    int64_t start_due = 0;
+
     bool launched = false;
     bool had_tasks = false;
     int64_t launched_at = 0;
@@ -117,7 +120,8 @@ Window *window_by_id(uint32_t id);
 // Input (input.cpp)
 void input_bind_seat(wl_registry *registry, uint32_t name, uint32_t version);
 void input_set_cursor_shape_manager(struct wp_cursor_shape_manager_v1 *manager);
-void input_forget_window(uint32_t id);
+// Ends any key, button or touch still held on the window before it goes away.
+void input_forget_window(const Window *w);
 // Forgets all seat state when the Wayland connection ends.
 void input_reset();
 int64_t input_next_deadline();
