@@ -82,6 +82,12 @@ Window *live(uint32_t id) {
     return w && !w->closing && w->display_id >= 0 ? w : nullptr;
 }
 
+// For releasing what is held: a closing window still has its display until it is destroyed.
+Window *holder(uint32_t id) {
+    Window *w = window_by_id(id);
+    return w && w->display_id >= 0 ? w : nullptr;
+}
+
 void inject_motion(const Window *w, int action, int action_button, int buttons, int source, int count, const int *ids,
         const float *xy, float vscroll, float hscroll, int64_t down) {
     JNIEnv *env = java.env;
@@ -142,17 +148,22 @@ void pointer_enter(void *, wl_pointer *pointer, uint32_t serial, wl_surface *sur
         mouse_event(w, ACTION_HOVER_ENTER);
 }
 
-void pointer_leave(void *, wl_pointer *, uint32_t, wl_surface *) {
-    if (Window *w = live(s.pointer_window)) {
+// Releases buttons and side keys still held on the pointer's window, then forgets the pointer.
+void drop_pointer(bool hover_exit) {
+    if (Window *w = holder(s.pointer_window)) {
         bool was_pressed = s.pressed;
         end_press(w);
-        if (!was_pressed)
+        if (hover_exit && !was_pressed && !w->closing)
             mouse_event(w, ACTION_HOVER_EXIT);
     }
     s.side_keys.clear();
     s.pointer_window = 0;
     s.buttons = 0;
     s.pressed = false;
+}
+
+void pointer_leave(void *, wl_pointer *, uint32_t, wl_surface *) {
+    drop_pointer(true);
 }
 
 void pointer_motion(void *, wl_pointer *, uint32_t, wl_fixed_t x, wl_fixed_t y) {
@@ -302,7 +313,7 @@ void keyboard_enter(void *, wl_keyboard *, uint32_t, wl_surface *surface, wl_arr
 }
 
 void keyboard_leave(void *, wl_keyboard *, uint32_t, wl_surface *) {
-    release_keys(live(s.key_window));
+    release_keys(holder(s.key_window));
     s.key_window = 0;
 }
 
@@ -458,19 +469,19 @@ void seat_capabilities(void *, wl_seat *seat, uint32_t caps) {
         s.pointer = wl_seat_get_pointer(seat);
         wl_pointer_add_listener(s.pointer, &pointer_listener, nullptr);
     } else if (!want_pointer && s.pointer) {
+        drop_pointer(false);
         if (s.shape_device)
             wp_cursor_shape_device_v1_destroy(s.shape_device);
         s.shape_device = nullptr;
         wl_pointer_release(s.pointer);
         s.pointer = nullptr;
-        s.pointer_window = 0;
     }
     bool want_keyboard = caps & WL_SEAT_CAPABILITY_KEYBOARD;
     if (want_keyboard && !s.keyboard) {
         s.keyboard = wl_seat_get_keyboard(seat);
         wl_keyboard_add_listener(s.keyboard, &keyboard_listener, nullptr);
     } else if (!want_keyboard && s.keyboard) {
-        release_keys(live(s.key_window));
+        release_keys(holder(s.key_window));
         wl_keyboard_release(s.keyboard);
         s.keyboard = nullptr;
         s.key_window = 0;
@@ -480,9 +491,12 @@ void seat_capabilities(void *, wl_seat *seat, uint32_t caps) {
         s.touch = wl_seat_get_touch(seat);
         wl_touch_add_listener(s.touch, &touch_listener, nullptr);
     } else if (!want_touch && s.touch) {
+        if (Window *w = holder(s.touch_window); w && !s.touches.empty())
+            send_touches(w, ACTION_CANCEL);
         wl_touch_release(s.touch);
         s.touch = nullptr;
         s.touches.clear();
+        s.touch_window = 0;
     }
 }
 
