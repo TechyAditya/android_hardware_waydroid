@@ -79,6 +79,8 @@
 #include "relative-pointer-unstable-v1-client-protocol.h"
 #include "idle-inhibit-unstable-v1-client-protocol.h"
 #include "fractional-scale-v1-client-protocol.h"
+#include "color-management-v1-client-protocol.h"
+#include "hdr.h"
 
 using ::android::hardware::hidl_string;
 
@@ -502,6 +504,7 @@ window::~window() {
     if (idle_inhibitor)
         zwp_idle_inhibitor_v1_destroy(idle_inhibitor);
 
+    hdr_destroy_window(this);
     layers.clear();
     if (dedicated_background_surface) {
         if (viewport)
@@ -2032,6 +2035,8 @@ registry_handle_global(void *data, struct wl_registry *registry,
                 &wl_data_device_manager_interface, std::min(version,  3U));
         if (d->data_device_manager && d->seat)
             d->data_device = wl_data_device_manager_get_data_device(d->data_device_manager, d->seat);
+    } else if (strcmp(interface, wp_color_manager_v1_interface.name) == 0) {
+        hdr_bind_color_manager(d, registry, id, version);
     } else if (strcmp(interface, "gtk_shell1") == 0) {
         if (version < 6)
             d->supports_cursor_viewport = false;
@@ -2190,6 +2195,7 @@ create_display(const char *gralloc)
     wl_registry_add_listener(display->registry,
                  &registry_listener, display);
     wl_display_roundtrip(display->display);
+    hdr_init(display);
 
     if (pthread_create(&display->wayland_thread, nullptr, hwc_wayland_thread, display->display) != 0) {
         ALOGE("Couldn't create wayland thread");

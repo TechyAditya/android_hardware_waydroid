@@ -205,6 +205,8 @@ struct window {
     std::vector<layer> layers;
 
     std::unique_ptr<buffer> snapshot_buffer;
+    // HDR video subsurface below the layers, see hdr.cpp
+    struct hdr_window_state *hdr;
 
     std::string appID;
     std::string taskID;
@@ -331,6 +333,8 @@ struct display {
     struct wp_fractional_scale_manager_v1 *fractional_scale_manager;
     struct wl_data_device_manager *data_device_manager;
     struct wl_data_device *data_device;
+    // Color management and the output's HDR capabilities, see hdr.cpp
+    struct hdr_display_state *hdr;
 
     int system_version;
     GrallocType gtype;
