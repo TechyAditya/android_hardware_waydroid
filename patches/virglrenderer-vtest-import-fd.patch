@@ -64,20 +64,22 @@ index 1bd515c..70ac8e8 100644
 +
  #endif /* VTEST_PROTOCOL */
 diff --git a/vtest/vtest_renderer.c b/vtest/vtest_renderer.c
-index ba4feb1..951d537 100644
+index ba4feb1..d194729 100644
 --- a/vtest/vtest_renderer.c
 +++ b/vtest/vtest_renderer.c
-@@ -44,6 +44,9 @@
+@@ -44,6 +44,11 @@
  #include <sys/uio.h>
  #include <sys/socket.h>
  #include <sys/mman.h>
 +#include <sys/ioctl.h>
 +#include <sys/stat.h>
++#include <sys/vfs.h>
++#include <linux/magic.h>
 +#include <linux/udmabuf.h>
  #ifdef HAVE_EVENTFD_H
  #include <sys/eventfd.h>
  #endif
-@@ -3053,6 +3056,168 @@ out:
+@@ -3053,6 +3058,186 @@ out:
     return ret;
  }
  
@@ -115,6 +117,13 @@ index ba4feb1..951d537 100644
 +   const uint64_t memfd_size = st.st_size;
 +   if (!memfd_size || memfd_size % page_size)
 +      return report_failure("memfd size is not page aligned", -EINVAL);
++
++   /* Drivers pad allocations by far less than this.  The limit keeps an
++    * untrusted client from making the server allocate padding memory.
++    */
++   const uint64_t max_padding = memfd_size / 4 + (2u << 20);
++   if (size > memfd_size && size - memfd_size > max_padding)
++      return report_failure("requested size exceeds the memfd size", -EINVAL);
 +
 +   const int seals = fcntl(memfd, F_GET_SEALS);
 +   if (!(seals & F_SEAL_SHRINK) && fcntl(memfd, F_ADD_SEALS, F_SEAL_SHRINK))
@@ -175,17 +184,23 @@ index ba4feb1..951d537 100644
 +      if (dmabuf_fd < 0)
 +         return 0;
 +      fd = dmabuf_fd;
-+   }
-+
-+   if (!size) {
-+      const off_t end = lseek(fd, 0, SEEK_END);
-+      if (end <= 0) {
++   } else {
++      struct statfs fs;
++      if (fstatfs(fd, &fs) || fs.f_type != DMA_BUF_MAGIC) {
 +         close(fd);
-+         report_failure("failed to get dma-buf size", -EINVAL);
++         report_failure("imported fd is neither a memfd nor a dma-buf", -EINVAL);
 +         return 0;
 +      }
-+      size = end;
 +   }
++
++   const off_t end = lseek(fd, 0, SEEK_END);
++   if (end <= 0 || size > (uint64_t)end) {
++      close(fd);
++      report_failure("invalid dma-buf size", -EINVAL);
++      return 0;
++   }
++   if (!size)
++      size = end;
 +
 +   struct vtest_resource *res = vtest_new_resource(0);
 +   if (!res) {
@@ -214,12 +229,17 @@ index ba4feb1..951d537 100644
 +   return res->res_id;
 +}
 +
-+int vtest_resource_import_fd(UNUSED uint32_t length_dw)
++int vtest_resource_import_fd(uint32_t length_dw)
 +{
 +   struct vtest_context *ctx = vtest_get_current_context();
 +   uint32_t vcmd_resource_import_fd[VCMD_RESOURCE_IMPORT_FD_SIZE];
 +   uint32_t resp_buf[VTEST_HDR_SIZE + 1];
 +   int ret;
++
++   if (ctx->protocol_version < 5)
++      return report_failed_call("protocol version too low", -EINVAL);
++   if (length_dw != VCMD_RESOURCE_IMPORT_FD_SIZE)
++      return report_failed_call("invalid command length", -EINVAL);
 +
 +   ret = ctx->input->read(ctx->input, &vcmd_resource_import_fd,
 +                          sizeof(vcmd_resource_import_fd));
