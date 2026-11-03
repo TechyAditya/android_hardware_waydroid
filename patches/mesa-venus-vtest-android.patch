@@ -1,3 +1,23 @@
+diff --git a/src/util/u_gralloc/u_gralloc_fallback.c b/src/util/u_gralloc/u_gralloc_fallback.c
+index 44fb32d..5de3aba 100644
+--- a/src/util/u_gralloc/u_gralloc_fallback.c
++++ b/src/util/u_gralloc/u_gralloc_fallback.c
+@@ -147,6 +147,15 @@ fallback_gralloc_get_buffer_info(struct u_gralloc *gralloc,
+    out->fds[0] = hnd->handle->data[0];
+    out->strides[0] = stride;
+ 
++   /* Waydroid's gralloc.default: the ints after the fd start with its magic
++    * and flags.  A buffer in GPU memory also has its offset at 3 and its
++    * DRM format modifier at 11 (low) and 12 (high). */
++   const int *ints = hnd->handle->data + hnd->handle->numFds;
++   if (hnd->handle->numInts >= 13 && ints[0] == 0x3141592 && (ints[1] & 0x2)) {
++      out->modifier = (uint64_t)(uint32_t)ints[12] << 32 | (uint32_t)ints[11];
++      out->offsets[0] = ints[3];
++   }
++
+ #ifdef HAS_FREEDRENO
+    uint32_t gmsm = ('g' << 24) | ('m' << 16) | ('s' << 8) | 'm';
+    if (hnd->handle->numInts >= 2 && hnd->handle->data[hnd->handle->numFds] == gmsm) {
 diff --git a/src/util/u_gralloc/u_gralloc_internal.c b/src/util/u_gralloc/u_gralloc_internal.c
 index c645202..64962f2 100644
 --- a/src/util/u_gralloc/u_gralloc_internal.c
