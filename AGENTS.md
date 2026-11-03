@@ -36,5 +36,6 @@ Each check is _red_ on its bug and green when fixed:
 - Waydroid reads `waydroid.cfg` with configparser, which lowercases keys. A mixed-case property there becomes a duplicate key, and Waydroid refuses to start. Put mixed-case properties in `/var/lib/waydroid/waydroid_base.prop`. `waydroid upgrade` regenerates that file.
 - Gallery opens shared storage only through a `content://media/...` URI. A `file://` path fails with "Can't play this video", and the media ID changes, so look it up by `_data` each time as `ramp-check.sh` does.
 - YouTube resumes at the last position, which can be the end. Open videos with `&t=1`. ExoPlayer can also keep one decoder across videos, so a property that a decoder reads at start applies after the app restarts.
-- `debug.sf.treat_170m_as_sRGB` has no effect here. The host decoder tags SDR video as sRGB instead.
+- SurfaceFlinger reads `debug.sf.treat_170m_as_sRGB` once at start, with `atoi()`. Set it to `1`; `true` reads as off. The host decoder already tags SDR video as sRGB, so this stack works without it.
+- Video thumbnails, from Gallery or the file picker, crash `virgl_render_server` and then `mediaserver`. Use Just Player (`com.brouken.player`) for video checks. It loads files from its own picker, not from an intent, and the media play key (keyevent 126) starts the last file.
 - adb reaches Android at `192.168.240.112:5555`, and `adb shell` runs as `shell`, not root. Use `sudo waydroid shell` for root.

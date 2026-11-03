@@ -203,6 +203,7 @@ waydroid session stop
 - HDR video shows as HDR only while Hyprland runs the monitor in HDR mode. Otherwise it shows as SDR.
 - RGBA video buffers take 2.7 times the memory of NV12. YouTube allocates 13 buffers of 3840x2160 for adaptive playback, which take about 430 MB of GPU memory as RGBA.
 - The stack was tested only on an NVIDIA GPU. The `nv12` route on other GPUs is untested.
+- Video thumbnails crash the Venus render server. When an app asks Android for a video thumbnail, as Gallery and the file picker do, `mediaserver` draws it on the GPU. The render server then crashes in NVIDIA's shader compiler (`libnvidia-glvkspirv`, during `vkCreateGraphicsPipelines`), and `mediaserver` aborts. Gallery stops playing, because it plays through `mediaserver`. It happens with every route in `persist.waydroid.video_sdr_output`. Not investigated yet; `coredumpctl list` shows each crash as a `virgl_render_server` dump followed by a `mediaserver` dump.
 
 ## Where each fix lives
 

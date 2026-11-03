@@ -5,12 +5,10 @@ What this fork plans to send to Waydroid, in plain words. Open so far: [#92](htt
 1. **Smoother window resizing, without the crash.** Dragging a window edge made Android rebuild its screen about 150 times in 8 seconds, and Android's graphics crashed during the rebuilds ([#2464](https://github.com/waydroid/waydroid/issues/2464)). [#92](https://github.com/waydroid/android_hardware_waydroid/pull/92) cuts the rebuilds to about 15 and stretches the old frame meanwhile. It is open. [android_vendor_waydroid#57](https://github.com/waydroid/android_vendor_waydroid/pull/57), also open, adds the missing null check that SurfaceFlinger crashed on. After both are merged, ask the reporter to confirm that the SurfaceFlinger crash and the composer deaths are both gone, then close #2464. [Drafts](#1-resizing-and-the-surfaceflinger-crash)
 2. **No more black flashes in the full Waydroid window.** The window was shown before Android finished drawing it. One PR. [Draft](#2-black-flashes-in-the-full-ui)
 3. **Several app windows behave.** Each window keeps its own size and closes with its app. Closing the full Waydroid window closes only its own apps. Android follows the monitor's refresh rate. Open as issue [waydroid#2470](https://github.com/waydroid/waydroid/issues/2470) and PR [#93](https://github.com/waydroid/android_hardware_waydroid/pull/93). [Drafts](#3-several-app-windows)
-4. **HDR video shows as HDR** when the compositor runs the monitor in HDR mode. One issue and two PRs, one in each repository. [Drafts](#4-hdr-video)
+4. **Video shows in its own colours.** Ordinary (SDR) video no longer looks washed out, because Android stops brightening its dark parts; stock Waydroid does this too. HDR video shows as HDR when the compositor runs the monitor in HDR mode. One issue and two PRs, one in each repository. [Drafts](#4-video-colours)
 5. **No audio crackles at high sample rates.** A comment on [#91](https://github.com/waydroid/android_hardware_waydroid/pull/91), someone else's open audio PR, which already has half of the fix. [Draft](#5-audio-at-high-sample-rates)
 6. **Video buffers in GPU memory go straight to the compositor.** On hold: upstream has nothing that creates those buffers yet. [Note](#6-gpu-memory-buffers-as-dma-bufs)
 7. **Bug report to NVIDIA.** Their driver misreads some video buffers, which shows as green or colourless frames. Ready, with a small program that shows the bug. [Draft](#7-nvidia-misreads-two-plane-nv12-imports)
-8. **Washed-out SDR video.** Android brightens the dark parts of ordinary video, and stock Waydroid does it too. One issue, ready. [Draft](#8-washed-out-sdr-video)
-
 Every head branch below starts from upstream `lineage-20` and is on `TechyAditya/android_hardware_waydroid` unless it says otherwise. Each one compiles alone with `stack/build.sh`. The changes ran together in the `all-fixes` build, not branch by branch. To open a pull request from a draft, save the body to a file and run:
 
 ```sh
@@ -173,39 +171,82 @@ These commits ran together in my build on Hyprland 0.57, CachyOS, an NVIDIA RTX 
 This branch alone was compiled, not run. I built the module outside the AOSP tree against the Android 13 VNDK v33 headers, so it has not been through a Soong build. I tested one monitor, not the two-monitor case in waydroid/waydroid#973.
 ```
 
-## 4. HDR video
+## 4. Video colours
 
-One issue in `waydroid/waydroid` and two PRs: `waydroid/android_vendor_waydroid` from `TechyAditya:hdr`, and `waydroid/android_hardware_waydroid` from `TechyAditya:pr/hdr-output`. Open the vendor PR first, then link each PR from the other.
+One issue in `waydroid/waydroid` and two PRs: `waydroid/android_vendor_waydroid` from `TechyAditya:hdr`, and `waydroid/android_hardware_waydroid` from `TechyAditya:pr/hdr-output`. Open the issue first, then the vendor PR, then the composer PR, and replace `ISSUE`, `PR1`, and `PR2` with their numbers.
+
+This fork fixes the SDR part in its host decoder, which tags SDR video as sRGB. Upstream has no host decoder, so the vendor PR sets SurfaceFlinger's own switch for it instead.
+
+The SDR measurements come from stock components on 2026-11-04: the grey-bar clip from `waydroid-venus/hwdec/test/ramp-check.sh`, played in Just Player, on the upstream `lineage-20` composer with software rendering through SwiftShader. This fork's decoder wrote YV12 into system memory, and only the transfer it reported changed between runs. The fork's gralloc and SurfaceFlinger null check were in place too, because stock `gralloc.default` cannot allocate YV12 (#2460) and stock SurfaceFlinger crashed when the player window opened (#2464). Neither touches colour. On NVIDIA the stock decoders cannot show the bug: they fail on the YV12 allocation, or fall back to RGB_565, which converts on the CPU before SurfaceFlinger.
+
+The earlier test that found `debug.sf.treat_170m_as_sRGB` had no effect set it to `true`. SurfaceFlinger reads it with `atoi()`, so that is 0.
 
 ### Issue
 
-Title: `[Feature] Show HDR video as HDR on HDR outputs`
+Title: `[BUG] Video colours are wrong: SDR video looks washed out, and HDR video shows as SDR`
 
 ```markdown
 **Describe the bug**
 
-When the Wayland compositor runs the output in HDR mode, for example Hyprland with HDR on, Waydroid still shows HDR10 and HLG video as SDR. The composer HAL is 2.1, behind `HWC2On1Adapter`, so Android sees no HDR display and SurfaceFlinger tone-maps every HDR video to SDR. This HAL can neither output PQ nor pass HDR metadata through.
+Video in Waydroid does not show in its own colours:
+
+1. SDR video looks washed out and banded in dark scenes, next to the same video in a browser. Decoders report the SMPTE 170M transfer for BT.709 and BT.601 video, and Android 13's SurfaceFlinger converts that curve to sRGB, which lifts dark shades. Android has a switch that shows such video as sRGB instead, `debug.sf.treat_170m_as_sRGB`, and Pixel devices turn it on. Waydroid leaves it off.
+2. HDR10 and HLG video shows as SDR, even when the compositor runs the output in HDR mode, for example Hyprland with HDR on. The composer HAL is 2.1, behind `HWC2On1Adapter`, so Android sees no HDR display and tone-maps every HDR video to SDR.
+
+I measured the first with a clip of 16 grey bars (BT.709, limited range), played in Just Player, on the upstream lineage-20 composer with software rendering. Only the transfer that the decoder reports changes between the two runs:
+
+| Bar value | 17 | 34 | 51 | 68 | 102 | 136 |
+| --- | --- | --- | --- | --- | --- | --- |
+| Tagged SMPTE 170M (what Android's decoders report) | 32 | 50 | 66 | 83 | 115 | 146 |
+| Tagged sRGB | 16 | 34 | 50 | 68 | 101 | 135 |
+
+17 becoming 32 is the SMPTE 170M curve decoded and then encoded as sRGB. Near black, the curve is about 3 times steeper, which spreads dark gradients into visible bands.
+
+**To reproduce**
+
+SDR video:
+
+1. Make the clip: `ffmpeg -f lavfi -i color=black:s=1920x1080:r=30:d=30 -vf "geq=lum='16+floor(X*16/W)*219/15':cb=128:cr=128,format=yuv420p" -c:v libx264 -qp 2 -bsf:v h264_metadata=colour_primaries=1:transfer_characteristics=1:matrix_coefficients=1:video_full_range_flag=0 ramp.mp4`
+2. Play it in an Android player whose decoder outputs YUV to the surface.
+3. Read the bar values from a host screenshot. The second bar should be 17.
+
+HDR video:
+
+1. Turn on HDR mode for the output in the compositor.
+2. Play an HDR10 video, for example in YouTube. It shows tone-mapped to SDR.
 
 **Expected behavior**
 
-On an HDR output, Android reports HDR10 and HLG, and HDR video reaches the compositor with its PQ or HLG encoding, so the compositor maps it to the output.
+SDR video shows the values in the stream, as a browser shows them. On an HDR output, Android reports HDR10 and HLG, and HDR video reaches the compositor with its PQ or HLG encoding, so the compositor maps it to the output.
 
 **General information**
 
 - Waydroid 1.6.3, LineageOS 20 images (system 20260927, vendor 20261022)
-- Hyprland 0.57 with HDR mode on, CachyOS
+- Hyprland 0.57 on CachyOS, NVIDIA RTX 3060 Laptop GPU (driver 615), one HDR panel
 
-waydroid/android_vendor_waydroid#PR1 and waydroid/android_hardware_waydroid#PR2 implement it.
+On NVIDIA with stock images, the stock decoders cannot output YUV, because `gralloc.default` cannot allocate YV12 (#2460), so I measured SDR video with a host decoder. I expect Intel and AMD with `gralloc=gbm` to show it with the stock decoders, but have not tested them.
+
+waydroid/android_vendor_waydroid#PR1 fixes the SDR colours. With waydroid/android_hardware_waydroid#PR2, it also shows HDR video as HDR.
 ```
 
-### PR 1: the adapter
+### PR 1: the vendor image
 
-Title: `waydroid-patches: hwc2on1: pass HDR capabilities and layer dataspaces`
+Title: `waydroid: Show video in its own colours`
 
 ```markdown
-Part of waydroid/waydroid#ISSUE. Needs waydroid/android_hardware_waydroid#PR2; without it, this patch changes nothing.
+Part of waydroid/waydroid#ISSUE. The HDR part needs waydroid/android_hardware_waydroid#PR2; without it, that part changes nothing.
 
-`HWC2On1Adapter` gives SurfaceFlinger no HDR capabilities and the composer no layer dataspaces. The patch fetches both through two functions the Waydroid composer exports, `waydroid_hwc_get_hdr_capabilities` and `waydroid_hwc_set_layer_dataspaces`. It looks them up with `dlsym` on the HWC1 module, so a composer without them keeps today's behavior.
+## Changes
+
+- SDR video: `product.mk` sets `debug.sf.treat_170m_as_sRGB=1`, as Pixel devices do ([gs201 `device.mk`](https://android.googlesource.com/device/google/gs201/+/aa81635cad78472c51383d8c8ece26cfe53cbc45/device.mk)). SurfaceFlinger then shows SMPTE 170M video as sRGB, so its dark shades are no longer lifted. It changes only layers with the SMPTE 170M transfer, so HDR video, which uses PQ or HLG, is not affected. SurfaceFlinger parses the value with `atoi()`, so it has to be `1`, not `true`.
+- HDR video: `0003-hwc2on1-Pass-HDR-capabilities-and-layer-dataspaces.patch`. `HWC2On1Adapter` gives SurfaceFlinger no HDR capabilities and the composer no layer dataspaces. The patch fetches both through two functions the Waydroid composer exports, `waydroid_hwc_get_hdr_capabilities` and `waydroid_hwc_set_layer_dataspaces`. It looks them up with `dlsym` on the HWC1 module, so a composer without them keeps today's behaviour.
+
+## Testing
+
+On Hyprland 0.57, CachyOS, an NVIDIA RTX 3060 (driver 615), and LineageOS 20 images:
+
+- SDR video: **Pending:** grey bars tagged SMPTE 170M, with the property set to 1.
+- HDR video: I built the patched adapter outside the AOSP tree, as `libhwc2on1adapter.so` in the vendor overlay, and ran it with the composer from waydroid/android_hardware_waydroid#PR2 on one HDR panel with Hyprland's HDR mode on. I have not built this branch in an AOSP tree.
 ```
 
 ### PR 2: the composer
@@ -213,7 +254,7 @@ Part of waydroid/waydroid#ISSUE. Needs waydroid/android_hardware_waydroid#PR2; w
 Title: `hwcomposer: show HDR video on HDR outputs`
 
 ```markdown
-Fixes waydroid/waydroid#ISSUE, together with waydroid/android_vendor_waydroid#PR1.
+Part of waydroid/waydroid#ISSUE, together with waydroid/android_vendor_waydroid#PR1, which this needs for HDR.
 
 ## Changes
 
@@ -312,41 +353,3 @@ These move them: the resolution, the allocation method, and the import order. Wi
 
 Waydroid's compositor reads Android's video buffers this way through Venus, so some frames show as solid green or without colour.
 ````
-
-## 8. Washed-out SDR video
-
-Confirmed on stock components on 2026-11-04, with the grey-bar clip from `waydroid-venus/hwdec/test/ramp-check.sh` played in Just Player. The setup was the upstream `lineage-20` composer, software rendering through SwiftShader, and this fork's decoder writing YV12 into system memory, with only the transfer it reports changed between runs. The fork's gralloc and SurfaceFlinger null check were in place too, because stock `gralloc.default` cannot allocate YV12 (#2460) and stock SurfaceFlinger crashed when the player window opened (#2464). Neither touches colour.
-
-Stock decoders cannot show the bug on NVIDIA: they fail on the YV12 allocation, or fall back to RGB_565, which converts on the CPU before SurfaceFlinger. It should show on Intel and AMD, where the stock decoders output YUV, but that is untested. Where Android converts the curve is not pinned down. The upstream composer has no colour code, and the layer was a device layer.
-
-Title: `[BUG] SDR video looks washed out: video tagged SMPTE 170M shows with lifted shadows`
-
-```markdown
-**Describe the bug**
-
-Ordinary SDR video looks washed out and banded in dark scenes compared with the same video in a browser. Android names the transfer of BT.709 and BT.601 video SMPTE 170M, and with that dataspace the dark levels reach the screen brighter than they are in the stream: the shape of a SMPTE 170M to sRGB conversion. The same frames tagged as sRGB show correctly.
-
-I measured it with a clip of 16 grey bars (BT.709, limited range), played in Just Player, on the upstream lineage-20 composer with software rendering. The decoder writes YV12 into system memory, and only the transfer it reports changes between the two runs:
-
-| Bar value | 17 | 34 | 51 | 68 | 102 | 136 |
-| --- | --- | --- | --- | --- | --- | --- |
-| Tagged SMPTE 170M (what Android's decoders report) | 32 | 50 | 66 | 83 | 115 | 146 |
-| Tagged sRGB | 16 | 34 | 50 | 68 | 101 | 135 |
-
-17 becoming 32 is the SMPTE 170M curve decoded and then encoded as sRGB. The slope near black is about 3 times steeper, which also spreads dark gradients into visible bands.
-
-`debug.sf.treat_170m_as_sRGB=true`, Android 13's switch for this, did not change it. Chromium tags SDR video as sRGB on Android for the same reason.
-
-**To reproduce**
-
-1. Make the clip: `ffmpeg -f lavfi -i color=black:s=1920x1080:r=30:d=30 -vf "geq=lum='16+floor(X*16/W)*219/15':cb=128:cr=128,format=yuv420p" -c:v libx264 -qp 2 -bsf:v h264_metadata=colour_primaries=1:transfer_characteristics=1:matrix_coefficients=1:video_full_range_flag=0 ramp.mp4`
-2. Play it in an Android player whose decoder outputs YUV to the surface.
-3. Read the bar values from a host screenshot. The second bar should be 17.
-
-On NVIDIA with stock images, the stock decoders cannot output YUV, because `gralloc.default` cannot allocate YV12 (#2460), so I measured with a host decoder. I expect Intel and AMD with `gralloc=gbm` to show it with the stock decoders, but have not tested them.
-
-**General information**
-
-- Waydroid 1.6.3, LineageOS 20 images (system 20260927, vendor 20261022)
-- Hyprland 0.57 on CachyOS, NVIDIA RTX 3060 Laptop GPU (driver 615)
-```
