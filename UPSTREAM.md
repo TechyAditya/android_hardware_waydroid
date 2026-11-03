@@ -1,12 +1,12 @@
 # Upstream pull requests and issues
 
-What this fork plans to send to Waydroid, in plain words. Open so far: [#92](https://github.com/waydroid/android_hardware_waydroid/pull/92), [android_vendor_waydroid#57](https://github.com/waydroid/android_vendor_waydroid/pull/57), [#93](https://github.com/waydroid/android_hardware_waydroid/pull/93) for issue [waydroid#2470](https://github.com/waydroid/waydroid/issues/2470), and [android_vendor_waydroid#58](https://github.com/waydroid/android_vendor_waydroid/pull/58) with [#94](https://github.com/waydroid/android_hardware_waydroid/pull/94) for issue [waydroid#2471](https://github.com/waydroid/waydroid/issues/2471). A reply is posted on [#2464](https://github.com/waydroid/waydroid/issues/2464#issuecomment-6617138955), and the NVIDIA bug report is [forum thread 387942](https://forums.developer.nvidia.com/t/vulkan-some-nv12-dma-bufs-imported-as-two-plane-images-read-back-wrong-615-78-08/387942). Nothing else has been posted.
+What this fork plans to send to Waydroid, in plain words. Open so far: [#92](https://github.com/waydroid/android_hardware_waydroid/pull/92), [android_vendor_waydroid#57](https://github.com/waydroid/android_vendor_waydroid/pull/57), [#93](https://github.com/waydroid/android_hardware_waydroid/pull/93) for issue [waydroid#2470](https://github.com/waydroid/waydroid/issues/2470), and [android_vendor_waydroid#58](https://github.com/waydroid/android_vendor_waydroid/pull/58) with [#94](https://github.com/waydroid/android_hardware_waydroid/pull/94) for issue [waydroid#2471](https://github.com/waydroid/waydroid/issues/2471). Replies are posted on [#2464](https://github.com/waydroid/waydroid/issues/2464#issuecomment-6617138955) and [#91](https://github.com/waydroid/android_hardware_waydroid/pull/91#issuecomment-6618281541), and the NVIDIA bug report is [forum thread 387942](https://forums.developer.nvidia.com/t/vulkan-some-nv12-dma-bufs-imported-as-two-plane-images-read-back-wrong-615-78-08/387942). Nothing else has been posted.
 
 1. **Smoother window resizing, without the crash.** Dragging a window edge made Android rebuild its screen about 150 times in 8 seconds, and Android's graphics crashed during the rebuilds ([#2464](https://github.com/waydroid/waydroid/issues/2464)). [#92](https://github.com/waydroid/android_hardware_waydroid/pull/92) cuts the rebuilds to about 15 and stretches the old frame meanwhile. It is open. [android_vendor_waydroid#57](https://github.com/waydroid/android_vendor_waydroid/pull/57), also open, adds the missing null check that SurfaceFlinger crashed on. After both are merged, ask the reporter to confirm that the SurfaceFlinger crash and the composer deaths are both gone, then close #2464. [Drafts](#1-resizing-and-the-surfaceflinger-crash)
 2. **No more black flashes in the full Waydroid window.** The window was shown before Android finished drawing it. One PR. [Draft](#2-black-flashes-in-the-full-ui)
 3. **Several app windows behave.** Each window keeps its own size and closes with its app. Closing the full Waydroid window closes only its own apps. Android follows the monitor's refresh rate. Open as issue [waydroid#2470](https://github.com/waydroid/waydroid/issues/2470) and PR [#93](https://github.com/waydroid/android_hardware_waydroid/pull/93). [Drafts](#3-several-app-windows)
 4. **Video shows in its own colours.** Ordinary (SDR) video no longer looks washed out, because Android stops brightening its dark parts; stock Waydroid does this too. HDR video shows as HDR when the compositor runs the monitor in HDR mode. Open as issue [waydroid#2471](https://github.com/waydroid/waydroid/issues/2471), with PRs [android_vendor_waydroid#58](https://github.com/waydroid/android_vendor_waydroid/pull/58) and [#94](https://github.com/waydroid/android_hardware_waydroid/pull/94). [Drafts](#4-video-colours)
-5. **No audio crackles at high sample rates.** A comment on [#91](https://github.com/waydroid/android_hardware_waydroid/pull/91), someone else's open audio PR, which already has half of the fix. [Draft](#5-audio-at-high-sample-rates)
+5. **No audio crackles at high sample rates.** Posted as [a comment](https://github.com/waydroid/android_hardware_waydroid/pull/91#issuecomment-6618281541) on [#91](https://github.com/waydroid/android_hardware_waydroid/pull/91), someone else's open audio PR, which already has half of the fix. [Draft](#5-audio-at-high-sample-rates)
 6. **Video buffers in GPU memory go straight to the compositor.** On hold: upstream has nothing that creates those buffers yet. [Note](#6-gpu-memory-buffers-as-dma-bufs)
 7. **Bug report to NVIDIA.** Their driver misreads some video buffers, which shows as green or colourless frames. Posted as [forum thread 387942](https://forums.developer.nvidia.com/t/vulkan-some-nv12-dma-bufs-imported-as-two-plane-images-read-back-wrong-615-78-08/387942), with a small program that shows the bug. [Draft](#7-nvidia-misreads-two-plane-nv12-imports)
 Every head branch below starts from upstream `lineage-20` and is on `TechyAditya/android_hardware_waydroid` unless it says otherwise. Each one compiles alone with `stack/build.sh`. The changes ran together in the `all-fixes` build, not branch by branch. To open a pull request from a draft, save the body to a file and run:
@@ -88,7 +88,7 @@ Frame pacing averaged 17 ms with the change. I built the module outside the AOSP
 
 ## 3. Several app windows
 
-Posted on 2026-11-04 as issue [waydroid/waydroid#2470](https://github.com/waydroid/waydroid/issues/2470) and PR [waydroid/android_hardware_waydroid#93](https://github.com/waydroid/android_hardware_waydroid/pull/93), head `TechyAditya:pr/multi-window`. The branch has the three single-window commits, the two full UI commits, and the refresh rate commit.
+Posted on 2026-11-04 as issue [waydroid/waydroid#2470](https://github.com/waydroid/waydroid/issues/2470) and PR [waydroid/android_hardware_waydroid#93](https://github.com/waydroid/android_hardware_waydroid/pull/93), head `TechyAditya:pr/multi-window`. The branch has the three single-window commits, the two full UI commits, and the refresh rate commit. Copilot's four review threads are fixed and resolved, and the Bugbot and GPT-5.6 Sol findings worth fixing are folded into their commits. The head is `52c964f`.
 
 ### Issue
 
@@ -173,7 +173,7 @@ This branch alone was compiled, not run. I built the module outside the AOSP tre
 
 ## 4. Video colours
 
-Posted on 2026-11-04 as issue [waydroid/waydroid#2471](https://github.com/waydroid/waydroid/issues/2471), PR [waydroid/android_vendor_waydroid#58](https://github.com/waydroid/android_vendor_waydroid/pull/58) from `TechyAditya:hdr`, and PR [waydroid/android_hardware_waydroid#94](https://github.com/waydroid/android_hardware_waydroid/pull/94) from `TechyAditya:pr/hdr-output`. The drafts below use `ISSUE`, `PR1`, and `PR2` for those numbers.
+Posted on 2026-11-04 as issue [waydroid/waydroid#2471](https://github.com/waydroid/waydroid/issues/2471), PR [waydroid/android_vendor_waydroid#58](https://github.com/waydroid/android_vendor_waydroid/pull/58) from `TechyAditya:hdr`, and PR [waydroid/android_hardware_waydroid#94](https://github.com/waydroid/android_hardware_waydroid/pull/94) from `TechyAditya:pr/hdr-output`. The drafts below use `ISSUE`, `PR1`, and `PR2` for those numbers. The Bugbot and GPT-5.6 Sol findings worth fixing on #94 are folded into its commit, now `26797a7`, and its description below is the current one. Both reviewers found nothing in #58.
 
 This fork fixes the SDR part in its host decoder, which tags SDR video as sRGB. Upstream has no host decoder, so the vendor PR sets SurfaceFlinger's own switch for it instead.
 
@@ -262,8 +262,11 @@ Part of waydroid/waydroid#ISSUE, together with waydroid/android_vendor_waydroid#
 - With HDR reported, an opaque, untransformed P010 layer becomes an overlay. The composer converts it from Y'CbCr to R'G'B', keeping its PQ or HLG encoding, into a 10-bit `XBGR2101010` wl_shm buffer on a subsurface below the client target, and tags it with a BT.2020 PQ or HLG image description. The compositor maps it to the output.
 - `color-management-v1.xml` comes from wayland-protocols 1.50, which is newer than `external/wayland-protocols`.
 - `persist.waydroid.no_hdr` turns it off.
+- HDR is reported only when the compositor also takes `XBGR2101010` wl_shm buffers.
 
-Converting a 4K frame shown at 2560x1440 takes about 11 ms on 8 threads. A frame already on screen is not converted again.
+Converting a 4K frame shown at 2560x1440 takes about 11 ms on 8 threads. A frame already on screen is not converted again. While the compositor holds every converted buffer, a new frame is dropped and the one on screen stays.
+
+Android reads the HDR capabilities when the display connects. Turning the output's HDR mode on or off while Waydroid runs takes effect at the next display hotplug, such as a window resize or a new session.
 
 ## Testing
 
@@ -272,7 +275,7 @@ Tested on one HDR panel with Hyprland's HDR mode on, Hyprland 0.57, and LineageO
 
 ## 5. Audio at high sample rates
 
-A comment on [#91](https://github.com/waydroid/android_hardware_waydroid/pull/91), not a new PR. #91 already scales the ALSA buffer with the sample rate, which its author adopted from an earlier comment of mine. The remaining piece is the period that `out_get_buffer_size()` reports, from `audio-rate-buffer`. Before posting, record a 192 kHz run with and without the change. No counts are recorded yet.
+A comment on [#91](https://github.com/waydroid/android_hardware_waydroid/pull/91), not a new PR. #91 already scales the ALSA buffer with the sample rate, which its author adopted from an earlier comment of mine. The remaining piece is the period that `out_get_buffer_size()` reports, from `audio-rate-buffer`. Posted on 2026-11-04 as [this comment](https://github.com/waydroid/android_hardware_waydroid/pull/91#issuecomment-6618281541), with one sentence added at the end: "I have not measured how much it helps: the crackle came every few minutes, too rarely to show in short recordings." Three 6-second recordings of each build at 192 kHz showed 0 or 1 gaps and 3 clicks every time, so they could not tell the builds apart.
 
 ````markdown
 Thanks for adding the scaled buffer. One more piece is needed at high rates. `out_get_buffer_size()` still reports `PLAYBACK_PERIOD_SIZE` frames at every rate: 21 ms at 48 kHz, but 5.3 ms at 192 kHz. With a HAL period that much shorter than its normal mix, AudioFlinger adds a fast mixer, and a normal mix that runs late then plays as a gap. At 192 kHz I heard a crackle every few minutes, and the fast mixer counted tens of thousands of late and early cycles.
@@ -357,4 +360,30 @@ Waydroid's compositor reads Android's video buffers this way through Venus, so s
 
 - FFmpeg commit [bdc07f3](https://ffmpeg.org/pipermail/ffmpeg-cvslog/2025-March/147590.html) says NV12 images map into CUDA wrong when one memory object holds both planes, and that it was reported to NVIDIA. That is Vulkan export to CUDA, not dma-buf import, but the pattern is the same: two planes in one image fail, and separate planes work.
 - [Thread 371199](https://forums.developer.nvidia.com/t/nvidia-vulkan-vkimagedrmformatmodifierexplicitcreateinfoext-rejects-nv12-layouts-that-the-list-based-path-accepts/371199) reports that `vkCreateImage` rejects these NV12 buffers when the plane layout is given explicitly. Here the import succeeds and the data is wrong, with an explicit layout and with a modifier list.
+````
+
+### Follow-up reply (not posted)
+
+The updated reproducer (`0bf7917`) adds `LIST=1`, which passes the modifier through `VkImageDrmFormatModifierListCreateInfoEXT` instead of an explicit layout. Post this as a reply to the thread once it is checked. It does not change the Waydroid stack, which imports each plane as its own image, and video frames are never this small.
+
+````markdown
+A smaller case, with an updated [nv12-import.c](https://github.com/TechyAditya/waydroid-venus/blob/master/hwdec/test/nv12-import.c). `LIST=1` passes the modifier through `VkImageDrmFormatModifierListCreateInfoEXT` instead of `VkImageDrmFormatModifierExplicitCreateInfoEXT`:
+
+```sh
+./nv12-import 2560 40 1
+LIST=1 ./nv12-import 2560 40 1
+```
+
+At 2560x40, 2560x48, and 2560x64, every buffer reads back wrong with the explicit layout, even when only one is allocated: 80% of the chroma is wrong. With a modifier list holding the same single modifier, the same buffers read back correctly, and `vkGetImageSubresourceLayout` returns the plane offsets and pitches that GBM reported. GBM gives these buffers modifier `0x0300000000606012` at 40 rows and `0x0300000000606013` at 48 and 64.
+
+With the explicit layout, `vkGetImageMemoryRequirements` also returns less memory than with the list:
+
+| Size | Explicit layout | Modifier list | dma-buf size | Explicit layout reads back |
+| --- | --- | --- | --- | --- |
+| 2560x16 | 61440 | 131072 or more | 131072 | correctly |
+| 2560x32 | 122880 | 196608 | 262144 | correctly |
+| 2560x40 | 245760 | 327680 or more | 327680 | wrong |
+| 2560x48 | 245760 | 327680 | 393216 | wrong |
+
+The smaller requirement at 16 and 32 rows still reads back correctly, so it does not explain the failures alone. The 1920x1080 and 2560x1440 failures in my first post happen with both the explicit layout and the modifier list.
 ````
