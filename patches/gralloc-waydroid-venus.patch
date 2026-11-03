@@ -1,5 +1,5 @@
 diff --git a/modules/gralloc/gralloc.cpp b/modules/gralloc/gralloc.cpp
-index 87bda97..dab15d0 100644
+index 87bda97..d421a3c 100644
 --- a/modules/gralloc/gralloc.cpp
 +++ b/modules/gralloc/gralloc.cpp
 @@ -26,6 +26,8 @@
@@ -31,7 +31,17 @@ index 87bda97..dab15d0 100644
      },
      .framebuffer = 0,
      .flags = 0,
-@@ -195,56 +203,114 @@ static int gralloc_alloc_buffer(alloc_device_t* dev,
+@@ -185,6 +193,9 @@ static int gralloc_alloc_buffer(alloc_device_t* dev,
+         err = mapBuffer(module, hnd);
+         if (err == 0) {
+             *pHandle = hnd;
++        } else {
++            close(fd);
++            delete hnd;
+         }
+     }
+     
+@@ -195,56 +206,115 @@ static int gralloc_alloc_buffer(alloc_device_t* dev,
  
  /*****************************************************************************/
  
@@ -96,8 +106,8 @@ index 87bda97..dab15d0 100644
 +    } else {
 +        // Venus imports gralloc buffers as images through Mesa's fallback
 +        // gralloc, which knows only the 565, 8888, 1010102, FP16 and YUV
-+        // formats.  The formats below are for the CPU, the camera or GPU
-+        // data buffers only.
++        // formats.  The formats below are for the CPU, the camera or, for
++        // BLOB, GPU data buffers only.
 +        const int gpuImageUsage = GRALLOC_USAGE_HW_TEXTURE |
 +                GRALLOC_USAGE_HW_RENDER | GRALLOC_USAGE_HW_COMPOSER |
 +                GRALLOC_USAGE_HW_FB;
@@ -107,6 +117,7 @@ index 87bda97..dab15d0 100644
 +            case HAL_PIXEL_FORMAT_Y16:
 +            case HAL_PIXEL_FORMAT_Y8:
 +            case kFormatR8:
++            case HAL_PIXEL_FORMAT_BLOB:
 +                if (usage & gpuImageUsage)
 +                    return -EINVAL;
 +                break;
@@ -202,7 +213,7 @@ index 2cd1007..c5cabc0 100644
          version = sizeof(native_handle);
          numInts = sNumInts();
 diff --git a/modules/gralloc/mapper.cpp b/modules/gralloc/mapper.cpp
-index ee3e40e..d37eead 100644
+index ee3e40e..69701fa 100644
 --- a/modules/gralloc/mapper.cpp
 +++ b/modules/gralloc/mapper.cpp
 @@ -175,6 +175,37 @@ int gralloc_lock(gralloc_module_t const* /*module*/,
@@ -226,14 +237,14 @@ index ee3e40e..d37eead 100644
 +    const bool cpu = usage & (GRALLOC_USAGE_SW_READ_MASK | GRALLOC_USAGE_SW_WRITE_MASK);
 +    const size_t ystride = hnd->stride;
 +    const size_t cstride = (ystride / 2 + 15) & ~size_t(15);
-+    uint8_t* y = cpu ? (uint8_t*)hnd->base : nullptr;
-+    uint8_t* cr = y + ystride * hnd->height;
-+    uint8_t* cb = cr + cstride * (hnd->height / 2);
++    const uintptr_t y = cpu ? uintptr_t(hnd->base) : 0;
++    const uintptr_t cr = y + ystride * hnd->height;
++    const uintptr_t cb = cr + cstride * (hnd->height / 2);
 +
 +    memset(ycbcr, 0, sizeof(*ycbcr));
-+    ycbcr->y = y;
-+    ycbcr->cb = cb;
-+    ycbcr->cr = cr;
++    ycbcr->y = reinterpret_cast<void*>(y);
++    ycbcr->cb = reinterpret_cast<void*>(cb);
++    ycbcr->cr = reinterpret_cast<void*>(cr);
 +    ycbcr->ystride = ystride;
 +    ycbcr->cstride = cstride;
 +    ycbcr->chroma_step = 1;
