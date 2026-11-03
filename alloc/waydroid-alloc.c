@@ -35,9 +35,15 @@ static struct gbm_device *gbm;
 #define MAX_MODIFIERS 64
 static struct {
    uint32_t format;
+   /* video is only sampled, which EGL calls external */
+   bool external_ok;
    uint64_t modifiers[MAX_MODIFIERS];
    int count;
-} layouts[2] = { { .format = DRM_FORMAT_ABGR8888 }, { .format = DRM_FORMAT_XBGR8888 } };
+} layouts[3] = {
+   { .format = DRM_FORMAT_ABGR8888 },
+   { .format = DRM_FORMAT_XBGR8888 },
+   { .format = DRM_FORMAT_NV12, .external_ok = true },
+};
 
 static bool
 query_layouts(void)
@@ -56,18 +62,21 @@ query_layouts(void)
       EGLuint64KHR mods[MAX_MODIFIERS];
       EGLBoolean external[MAX_MODIFIERS];
       EGLint n = 0;
+      /* without NV12, video stays in system memory */
+      bool needed = !layouts[i].external_ok;
       if (!query(dpy, layouts[i].format, MAX_MODIFIERS, mods, external, &n)) {
-         ok = false;
+         ok = ok && !needed;
          continue;
       }
       for (EGLint j = 0; j < n; j++) {
          /* compositors leave out NVIDIA's compressed layouts */
          bool compressed = (mods[j] >> 56) == DRM_FORMAT_MOD_VENDOR_NVIDIA &&
                            ((mods[j] >> 23) & 7) != 0;
-         if (!external[j] && !compressed && mods[j] != DRM_FORMAT_MOD_INVALID)
+         if ((!external[j] || layouts[i].external_ok) && !compressed &&
+             mods[j] != DRM_FORMAT_MOD_INVALID)
             layouts[i].modifiers[layouts[i].count++] = mods[j];
       }
-      if (!layouts[i].count)
+      if (!layouts[i].count && needed)
          ok = false;
    }
    eglTerminate(dpy);
@@ -87,19 +96,28 @@ log_msg(const char *fmt, ...)
 static int
 allocate(const struct alloc_request *req, struct alloc_reply *reply)
 {
+   unsigned i = 0;
+   while (i < sizeof(layouts) / sizeof(layouts[0]) && layouts[i].format != req->format)
+      i++;
    if (req->version != ALLOC_VERSION || !req->width || !req->height ||
        req->width > ALLOC_MAX_DIMENSION || req->height > ALLOC_MAX_DIMENSION ||
-       (req->format != DRM_FORMAT_ABGR8888 && req->format != DRM_FORMAT_XBGR8888))
+       i == sizeof(layouts) / sizeof(layouts[0]) || !layouts[i].count)
+      return -EINVAL;
+   bool nv12 = req->format == DRM_FORMAT_NV12;
+   if (nv12 && (req->width % 2 || req->height % 2))
       return -EINVAL;
 
-   unsigned i = req->format == DRM_FORMAT_ABGR8888 ? 0 : 1;
    struct gbm_bo *bo = gbm_bo_create_with_modifiers2(gbm, req->width, req->height, req->format,
                                                      layouts[i].modifiers, layouts[i].count,
                                                      GBM_BO_USE_RENDERING);
    if (!bo)
       return -errno ? -errno : -ENOMEM;
    int fd = gbm_bo_get_fd(bo);
-   if (gbm_bo_get_plane_count(bo) != 1 || fd < 0) {
+   /* both NV12 planes in one dma-buf, with one stride as gralloc records it */
+   bool layout_ok = nv12 ? gbm_bo_get_plane_count(bo) == 2 &&
+                              gbm_bo_get_stride_for_plane(bo, 1) == gbm_bo_get_stride_for_plane(bo, 0)
+                         : gbm_bo_get_plane_count(bo) == 1;
+   if (!layout_ok || fd < 0) {
       if (fd >= 0)
          close(fd);
       gbm_bo_destroy(bo);
@@ -107,6 +125,7 @@ allocate(const struct alloc_request *req, struct alloc_reply *reply)
    }
    reply->stride = gbm_bo_get_stride_for_plane(bo, 0);
    reply->offset = gbm_bo_get_offset(bo, 0);
+   reply->offset1 = nv12 ? gbm_bo_get_offset(bo, 1) : 0;
    reply->modifier = gbm_bo_get_modifier(bo);
    /* the dma-buf keeps the memory alive after the bo is gone */
    gbm_bo_destroy(bo);

@@ -17,17 +17,19 @@ struct alloc_request {
    uint32_t version;
    uint32_t width;
    uint32_t height;
-   /* DRM fourcc: DRM_FORMAT_ABGR8888 or DRM_FORMAT_XBGR8888 */
+   /* DRM fourcc: DRM_FORMAT_ABGR8888, DRM_FORMAT_XBGR8888 or, for video,
+    * DRM_FORMAT_NV12 */
    uint32_t format;
 };
 
 struct alloc_reply {
    /* 0, or a negative errno */
    int32_t status;
-   /* bytes per row and plane offset in the dma-buf */
+   /* bytes per row and plane offset in the dma-buf; NV12's CbCr plane has
+    * the same stride, at offset1 */
    uint32_t stride;
    uint32_t offset;
-   uint32_t reserved;
+   uint32_t offset1;
    /* DRM format modifier, in GPU memory layout */
    uint64_t modifier;
    uint64_t size;

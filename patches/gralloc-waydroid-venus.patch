@@ -1,5 +1,5 @@
 diff --git a/modules/gralloc/gralloc.cpp b/modules/gralloc/gralloc.cpp
-index 87bda97..a9a2854 100644
+index 87bda97..3bc61f4 100644
 --- a/modules/gralloc/gralloc.cpp
 +++ b/modules/gralloc/gralloc.cpp
 @@ -22,10 +22,14 @@
@@ -55,7 +55,7 @@ index 87bda97..a9a2854 100644
          }
      }
      
-@@ -195,56 +209,210 @@ static int gralloc_alloc_buffer(alloc_device_t* dev,
+@@ -195,56 +209,222 @@ static int gralloc_alloc_buffer(alloc_device_t* dev,
  
  /*****************************************************************************/
  
@@ -66,6 +66,7 @@ index 87bda97..a9a2854 100644
 +static const char kAllocSocket[] = "/data/venus/" ALLOC_SOCKET_NAME;
 +static const uint32_t kDrmFormatAbgr8888 = 0x34324241; // 'AB24'
 +static const uint32_t kDrmFormatXbgr8888 = 0x34324258; // 'XB24'
++static const uint32_t kDrmFormatNv12 = 0x3231564e; // 'NV12'
 +
 +static int gralloc_alloc_gpu(int width, int height, int format,
 +        buffer_handle_t* pHandle, int* pStride)
@@ -84,7 +85,11 @@ index 87bda97..a9a2854 100644
 +        return -ENODEV;
 +    }
 +
++    // flexible YCbCr 4:2:0 in GPU memory is NV12, for video frames the host
++    // decoder writes
++    const bool nv12 = format == HAL_PIXEL_FORMAT_YCbCr_420_888;
 +    alloc_request req = {ALLOC_VERSION, uint32_t(width), uint32_t(height),
++            nv12 ? kDrmFormatNv12 :
 +            format == HAL_PIXEL_FORMAT_RGBX_8888 ? kDrmFormatXbgr8888 : kDrmFormatAbgr8888};
 +    alloc_reply reply = {};
 +    union {
@@ -108,10 +113,12 @@ index 87bda97..a9a2854 100644
 +    }
 +    close(s);
 +
-+    const uint64_t rowBytes = uint64_t(width) * 4;
-+    if (n != sizeof(reply) || reply.status != 0 || fd < 0 || reply.stride % 4 ||
++    const uint64_t bpp = nv12 ? 1 : 4;
++    const uint64_t rowBytes = uint64_t(width) * bpp;
++    if (n != sizeof(reply) || reply.status != 0 || fd < 0 || reply.stride % bpp ||
 +            reply.stride < rowBytes || reply.size > INT_MAX ||
-+            reply.offset + uint64_t(reply.stride) * height > reply.size) {
++            reply.offset + uint64_t(reply.stride) * height > reply.size ||
++            (nv12 && reply.offset1 + uint64_t(reply.stride) * ((height + 1) / 2) > reply.size)) {
 +        if (fd >= 0)
 +            close(fd);
 +        ALOGW("waydroid-alloc refused %dx%d (status %d)", width, height, reply.status);
@@ -124,7 +131,8 @@ index 87bda97..a9a2854 100644
 +    hnd->format = format;
 +    hnd->width = width;
 +    hnd->height = height;
-+    hnd->stride = int(reply.stride / 4);
++    hnd->stride = int(reply.stride / bpp);
++    hnd->offset1 = nv12 ? int(reply.offset1) : 0;
 +    hnd->modifier_lo = uint32_t(reply.modifier);
 +    hnd->modifier_hi = uint32_t(reply.modifier >> 32);
 +    *pHandle = hnd;
@@ -188,8 +196,12 @@ index 87bda97..a9a2854 100644
 +    const int gpuMemoryUsage = GRALLOC_USAGE_PRIVATE_0 | GRALLOC_USAGE_HW_RENDER;
 +    const int systemMemoryUsage = GRALLOC_USAGE_SW_READ_MASK | GRALLOC_USAGE_SW_WRITE_MASK |
 +            GRALLOC_USAGE_HW_FB | GRALLOC_USAGE_HW_VIDEO_ENCODER | GRALLOC_USAGE_HW_CAMERA_MASK;
-+    if ((usage & gpuMemoryUsage) && !(usage & systemMemoryUsage) &&
-+            (format == HAL_PIXEL_FORMAT_RGBA_8888 || format == HAL_PIXEL_FORMAT_RGBX_8888)) {
++    // Video frames are flexible YCbCr 4:2:0 that only the host decoder
++    // writes, which asks with GRALLOC_USAGE_PRIVATE_0 alone.
++    const bool gpuFormat = format == HAL_PIXEL_FORMAT_RGBA_8888 ||
++            format == HAL_PIXEL_FORMAT_RGBX_8888 ||
++            (format == HAL_PIXEL_FORMAT_YCbCr_420_888 && (usage & GRALLOC_USAGE_PRIVATE_0));
++    if ((usage & gpuMemoryUsage) && !(usage & systemMemoryUsage) && gpuFormat) {
 +        if (gralloc_alloc_gpu(width, height, format, pHandle, pStride) == 0)
 +            return 0;
 +        // Without the host allocator, a buffer in system memory still works.
@@ -297,7 +309,7 @@ index 87bda97..a9a2854 100644
      return 0;
  }
 diff --git a/modules/gralloc/gralloc_priv.h b/modules/gralloc/gralloc_priv.h
-index 2cd1007..99cd35d 100644
+index 2cd1007..7ba5a20 100644
 --- a/modules/gralloc/gralloc_priv.h
 +++ b/modules/gralloc/gralloc_priv.h
 @@ -63,7 +63,9 @@ struct private_handle_t {
@@ -311,7 +323,7 @@ index 2cd1007..99cd35d 100644
      };
  
      // file-descriptors
-@@ -77,6 +79,14 @@ struct private_handle_t {
+@@ -77,6 +79,17 @@ struct private_handle_t {
      // FIXME: the attributes below should be out-of-line
      uint64_t base __attribute__((aligned(8)));
      int     pid;
@@ -323,16 +335,19 @@ index 2cd1007..99cd35d 100644
 +    // DRM format modifier of a buffer in GPU memory
 +    uint32_t modifier_lo;
 +    uint32_t modifier_hi;
++    // offset of the CbCr plane of an NV12 buffer in GPU memory, whose stride
++    // is the luma stride; fills what was padding, so numInts is unchanged
++    int     offset1;
  
  #ifdef __cplusplus
      static inline int sNumInts() {
-@@ -87,7 +97,8 @@ struct private_handle_t {
+@@ -87,7 +100,8 @@ struct private_handle_t {
  
      private_handle_t(int fd, int size, int flags) :
          fd(fd), magic(sMagic), flags(flags), size(size), offset(0),
 -        base(0), pid(getpid())
 +        base(0), pid(getpid()), format(0), width(0), height(0), stride(0),
-+        modifier_lo(0), modifier_hi(0)
++        modifier_lo(0), modifier_hi(0), offset1(0)
      {
          version = sizeof(native_handle);
          numInts = sNumInts();
