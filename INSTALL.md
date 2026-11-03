@@ -148,6 +148,8 @@ Each fix also has its own branch, for review or for upstream pull requests:
 | --- | --- |
 | Refresh rates, GPU-memory buffers, HDR output, single-window focus | `TechyAditya/android_hardware_waydroid` `single-window-focus` |
 | Rate-limited resize hotplugs | `TechyAditya/android_hardware_waydroid` `resize-interval` ([waydroid/android_hardware_waydroid#92](https://github.com/waydroid/android_hardware_waydroid/pull/92)) |
+| Closing the full UI closes only its own apps | `TechyAditya/android_hardware_waydroid` `full-ui-close` |
+| Full UI frames copied before Android finished drawing them | `TechyAditya/android_hardware_waydroid` `shm-copy-fence` |
 | Audio HAL sample rate and float output | `TechyAditya/android_hardware_waydroid` `audio-rate-buffer` |
 | HDR passthrough in the HWC2-on-HWC1 adapter | `TechyAditya/android_vendor_waydroid` `hdr` |
 | Venus, the allocator, and the video decoder | `TechyAditya/waydroid-venus` `master` |
