@@ -747,6 +747,28 @@ std::string handle_command(const std::string &line) {
                    "x" + std::to_string(w->display_h) + " dpi=" + std::to_string(w->dpi) + "\n";
         return out.empty() ? "\n" : out;
     }
+    if (cmd == "state") {
+        std::string out;
+        for (auto &[id, w] : g.windows) {
+            out += w->pkg + " window=" + std::to_string(w->width) + "x" + std::to_string(w->height) +
+                   " scale120=" + std::to_string(w->scale120) + " frame_waiting=" + std::to_string(w->frame_waiting) +
+                   " pending_image=" + std::to_string(w->pending_image != nullptr) +
+                   " resize_pending=" + std::to_string(w->resize_pending) + " outputs=" +
+                   std::to_string(w->outputs.size()) + "\n";
+            for (auto &r : w->readers) {
+                int held = 0, attached = 0;
+                for (auto &[bid, e] : r->bufs) {
+                    held += e->held != nullptr;
+                    attached += w->attached == e.get();
+                }
+                out += "  reader gen=" + std::to_string(r->gen) + " " + std::to_string(r->width) + "x" +
+                       std::to_string(r->height) + " retired=" + std::to_string(r->retired) + " bufs=" +
+                       std::to_string(r->bufs.size()) + " held=" + std::to_string(held) +
+                       " attached=" + std::to_string(attached) + "\n";
+            }
+        }
+        return out.empty() ? "\n" : out;
+    }
     return "error unknown command\n";
 }
 
