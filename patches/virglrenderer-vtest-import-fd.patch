@@ -68,6 +68,27 @@ index e2c3baa..9cc1aff 100644
     }
  }
  
+diff --git a/src/venus/vkr_queue.c b/src/venus/vkr_queue.c
+index 61b94be..31163df 100644
+--- a/src/venus/vkr_queue.c
++++ b/src/venus/vkr_queue.c
+@@ -28,13 +28,11 @@ vkr_device_alloc_queue_sync(struct vkr_device *dev,
+       if (!sync)
+          return NULL;
+ 
+-      const VkExportFenceCreateInfo export_info = {
+-         .sType = VK_STRUCTURE_TYPE_EXPORT_FENCE_CREATE_INFO,
+-         .handleTypes = VK_EXTERNAL_FENCE_HANDLE_TYPE_SYNC_FD_BIT,
+-      };
++      /* Not exportable: the sync thread only waits on it, and NVIDIA waits
++       * on exportable fences by sleeping in 10 ms steps.
++       */
+       const struct VkFenceCreateInfo create_info = {
+          .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO,
+-         .pNext = dev->physical_device->KHR_external_fence_fd ? &export_info : NULL,
+       };
+       VkResult result =
+          vk->CreateFence(dev->base.handle.device, &create_info, NULL, &sync->fence);
 diff --git a/vtest/vtest.h b/vtest/vtest.h
 index b2708a2..a9d924f 100644
 --- a/vtest/vtest.h
