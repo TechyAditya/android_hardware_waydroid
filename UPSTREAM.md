@@ -6,7 +6,7 @@ The head branches are on `TechyAditya/android_hardware_waydroid` unless a row sa
 
 | Draft | Target | Head | Base | Ready |
 | --- | --- | --- | --- | --- |
-| [Rate-limit resize hotplugs](#rate-limit-resize-hotplugs-open-as-92) | `waydroid/android_hardware_waydroid` | `resize-interval` | `lineage-20` | Open as #92. Its description needs the update below. |
+| [Rate-limit resize hotplugs](#rate-limit-resize-hotplugs-open-as-92) | `waydroid/android_hardware_waydroid` | `resize-interval` | `lineage-20` | Open as #92 |
 | [Wait for the acquire fence before a wl_shm copy](#wait-for-the-acquire-fence-before-a-wl_shm-copy) | `waydroid/android_hardware_waydroid` | `shm-copy-fence` | `lineage-20` | Yes |
 | [Single-window display size, lifetime, and focus](#single-window-display-size-lifetime-and-focus) | `waydroid/android_hardware_waydroid` | `pr/single-window` | `lineage-20` | Yes |
 | [Close only the full UI's tasks](#close-only-the-full-uis-tasks) | `waydroid/android_hardware_waydroid` | `pr/full-ui-close` | `lineage-20` | After the single-window PR merges |
@@ -26,17 +26,7 @@ gh pr create -R waydroid/android_hardware_waydroid -B lineage-20 -H TechyAditya:
 
 ## Rate-limit resize hotplugs (open as #92)
 
-The branch has one commit that the description does not cover yet: `hwcomposer: scale the wl_pointer cursor like the other layers`. Replace the last sentence of change 2 in the description, "The cursor keeps the output scale, and nothing is stretched without `wp_viewporter`.", with:
-
-```markdown
-The cursor surface and its hotspot use the same content scale as the other layers. Nothing is stretched without `wp_viewporter`.
-```
-
-Then add the commit as change 3:
-
-```markdown
-3. `hwcomposer: scale the wl_pointer cursor like the other layers` gives the cursor the stretched content scale from `effective_scale()` while a resize hotplug is pending. Before, the cursor and its hotspot kept the display scale and drifted from the stretched frame.
-```
+The description covers all three commits on the branch, including `hwcomposer: scale the wl_pointer cursor like the other layers`, as change 3.
 
 ## Wait for the acquire fence before a wl_shm copy
 
