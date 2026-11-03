@@ -1,10 +1,10 @@
 # Upstream pull requests and issues
 
-What this fork plans to send to Waydroid, in plain words. Open so far: [#92](https://github.com/waydroid/android_hardware_waydroid/pull/92) and [android_vendor_waydroid#57](https://github.com/waydroid/android_vendor_waydroid/pull/57), with a reply posted on [#2464](https://github.com/waydroid/waydroid/issues/2464#issuecomment-6617138955). Nothing else has been posted.
+What this fork plans to send to Waydroid, in plain words. Open so far: [#92](https://github.com/waydroid/android_hardware_waydroid/pull/92), [android_vendor_waydroid#57](https://github.com/waydroid/android_vendor_waydroid/pull/57), and [#93](https://github.com/waydroid/android_hardware_waydroid/pull/93) for issue [waydroid#2470](https://github.com/waydroid/waydroid/issues/2470), with a reply posted on [#2464](https://github.com/waydroid/waydroid/issues/2464#issuecomment-6617138955). Nothing else has been posted.
 
 1. **Smoother window resizing, without the crash.** Dragging a window edge made Android rebuild its screen about 150 times in 8 seconds, and Android's graphics crashed during the rebuilds ([#2464](https://github.com/waydroid/waydroid/issues/2464)). [#92](https://github.com/waydroid/android_hardware_waydroid/pull/92) cuts the rebuilds to about 15 and stretches the old frame meanwhile. It is open. [android_vendor_waydroid#57](https://github.com/waydroid/android_vendor_waydroid/pull/57), also open, adds the missing null check that SurfaceFlinger crashed on. After both are merged, ask the reporter to confirm that the SurfaceFlinger crash and the composer deaths are both gone, then close #2464. [Drafts](#1-resizing-and-the-surfaceflinger-crash)
 2. **No more black flashes in the full Waydroid window.** The window was shown before Android finished drawing it. One PR. [Draft](#2-black-flashes-in-the-full-ui)
-3. **Several app windows behave.** Each window keeps its own size and closes with its app. Closing the full Waydroid window closes only its own apps. Android follows the monitor's refresh rate. One issue and one PR. [Drafts](#3-several-app-windows)
+3. **Several app windows behave.** Each window keeps its own size and closes with its app. Closing the full Waydroid window closes only its own apps. Android follows the monitor's refresh rate. Open as issue [waydroid#2470](https://github.com/waydroid/waydroid/issues/2470) and PR [#93](https://github.com/waydroid/android_hardware_waydroid/pull/93). [Drafts](#3-several-app-windows)
 4. **HDR video shows as HDR** when the compositor runs the monitor in HDR mode. One issue and two PRs, one in each repository. [Drafts](#4-hdr-video)
 5. **No audio crackles at high sample rates.** A comment on [#91](https://github.com/waydroid/android_hardware_waydroid/pull/91), someone else's open audio PR, which already has half of the fix. [Draft](#5-audio-at-high-sample-rates)
 6. **Video buffers in GPU memory go straight to the compositor.** On hold: upstream has nothing that creates those buffers yet. [Note](#6-gpu-memory-buffers-as-dma-bufs)
@@ -90,7 +90,7 @@ Frame pacing averaged 17 ms with the change. I built the module outside the AOSP
 
 ## 3. Several app windows
 
-One issue in `waydroid/waydroid` and one PR in `waydroid/android_hardware_waydroid`, head `TechyAditya:pr/multi-window`. The branch has the three single-window commits, the two full UI commits, and the refresh rate commit.
+Posted on 2026-11-04 as issue [waydroid/waydroid#2470](https://github.com/waydroid/waydroid/issues/2470) and PR [waydroid/android_hardware_waydroid#93](https://github.com/waydroid/android_hardware_waydroid/pull/93), head `TechyAditya:pr/multi-window`. The branch has the three single-window commits, the two full UI commits, and the refresh rate commit.
 
 ### Issue
 
@@ -134,7 +134,7 @@ Each window shows its app at its own size and closes with its app. Closing the f
 - Waydroid 1.6.3, LineageOS 20 images (system 20260927, vendor 20261022)
 - Hyprland 0.57 on CachyOS, NVIDIA RTX 3060 Laptop GPU (driver 615), 165 Hz panel
 
-waydroid/android_hardware_waydroid#PR fixes items 4 to 8.
+waydroid/android_hardware_waydroid#93 fixes items 4 to 8.
 ```
 
 ### PR
@@ -142,7 +142,7 @@ waydroid/android_hardware_waydroid#PR fixes items 4 to 8.
 Title: `hwcomposer: fix window size, lifetime and focus, full UI close, and refresh rate with several windows`
 
 ```markdown
-Fixes items 4 to 8 of waydroid/waydroid#ISSUE. Items 1 to 3 are multi-window mode problems that this PR does not change. For the resize crash, see waydroid/waydroid#2464 and #92.
+Fixes items 4 to 8 of waydroid/waydroid#2470. Items 1 to 3 are multi-window mode problems that this PR does not change. For the resize crash, see waydroid/waydroid#2464 and #92.
 
 ## Changes
 
@@ -170,7 +170,7 @@ These commits ran together in my build on Hyprland 0.57, CachyOS, an NVIDIA RTX 
 - An app shown in its own window keeps running when the full UI window closes, and Settings opened in the full UI closes with it.
 - `dumpsys SurfaceFlinger` shows `refresh-rate: 165.02 Hz` on the 165 Hz panel.
 
-This branch alone was compiled, not run. I built the module outside the AOSP tree against the Android 13 VNDK v33 headers, so it has not been through a Soong build. I tested one monitor, not the two-monitor case in #973.
+This branch alone was compiled, not run. I built the module outside the AOSP tree against the Android 13 VNDK v33 headers, so it has not been through a Soong build. I tested one monitor, not the two-monitor case in waydroid/waydroid#973.
 ```
 
 ## 4. HDR video
