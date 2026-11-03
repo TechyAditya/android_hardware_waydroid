@@ -8,7 +8,7 @@ Group=waydroid-venus
 Environment=__GL_SHADER_DISK_CACHE_PATH=/var/cache/waydroid-venus
 CacheDirectory=waydroid-venus
 # The socket directory belongs to the Waydroid user; see waydroid-venus.service.
-ExecStartPre=+/usr/bin/install -d -o @USER@ -g @USER@ -m 0755 @SOCKET_DIR@
+ExecStartPre=+/bin/sh -c '[ -d "$1" ] || install -d -o "$2" -g "$2" -m 0755 "$1"' sh @SOCKET_DIR@ @USER@
 ExecStartPre=+/usr/bin/setfacl -m u:waydroid-venus:rwx @SOCKET_DIR@
 ExecStartPre=+/usr/bin/rm -f @SOCKET_DIR@/alloc.sock
 # Only Android's allocator HAL, which runs as AID_SYSTEM, may connect.
