@@ -354,9 +354,10 @@ send_key_event(display *data, uint32_t key, wl_keyboard_key_state state);
 static int
 parse_task_id(const std::string &id)
 {
-    if (id.empty() || id.size() > 9 || id.find_first_not_of("0123456789") != std::string::npos)
+    if (id.empty() || id.size() > 10 || id.find_first_not_of("0123456789") != std::string::npos)
         return -1;
-    return atoi(id.c_str());
+    long long task = strtoll(id.c_str(), nullptr, 10);
+    return task <= INT32_MAX ? static_cast<int>(task) : -1;
 }
 
 static void
@@ -403,8 +404,13 @@ xdg_toplevel_handle_close(void *data, struct xdg_toplevel *)
     }
 
     std::scoped_lock lock(display->windowsMutex);
+    auto it = display->windows.find(key);
+    // Leave alone a window that replaced this one under the same key meanwhile
+    if (it != display->windows.end() && it->second->id != reinterpret_cast<uintptr_t>(data))
+        return;
     display->ignored_apps.insert(key);
-    display->windows.erase(key);
+    if (it != display->windows.end())
+        display->windows.erase(it);
 }
 
 static const struct xdg_toplevel_listener xdg_toplevel_listener = {
