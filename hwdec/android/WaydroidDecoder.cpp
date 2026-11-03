@@ -7,9 +7,12 @@
  *
  * When ACodec renders to a surface, the output buffers are the surface's
  * gralloc buffers, and the host writes frames straight into them: 8-bit
- * frames into NV12 buffers in GPU memory by a copy on the GPU, if the host
- * can, else into YV12 buffers, and 10-bit frames into P010 buffers.
- * Otherwise frames come back in shared memory and are copied out.
+ * frames into buffers in GPU memory if the host can, RGBA it converts them
+ * to or else NV12 it copies them into, otherwise into YV12 buffers, and
+ * 10-bit frames into P010 buffers.  RGBA comes first because NVIDIA misreads
+ * some NV12 buffers when SurfaceFlinger samples them, which shows as green
+ * or colourless frames.  Without a surface, frames come back in shared
+ * memory and are copied out.
  */
 #define LOG_TAG "WaydroidDecoder"
 
@@ -51,10 +54,14 @@ constexpr uint32_t kNativeUsage = GRALLOC_USAGE_SW_WRITE_OFTEN;
 // GRALLOC_USAGE_PRIVATE_0 alone as NV12 in GPU memory
 constexpr OMX_COLOR_FORMATTYPE kNativeFormatGpu =
         static_cast<OMX_COLOR_FORMATTYPE>(HAL_PIXEL_FORMAT_YCbCr_420_888);
+// and RGBA_8888 in GPU memory for any usage that leaves out the CPU
+constexpr OMX_COLOR_FORMATTYPE kNativeFormatRgba =
+        static_cast<OMX_COLOR_FORMATTYPE>(HAL_PIXEL_FORMAT_RGBA_8888);
 constexpr uint32_t kNativeUsageGpu = GRALLOC_USAGE_PRIVATE_0;
 // gralloc.default's private_handle_t: after the fd, magic and flags; for a
-// buffer in GPU memory its luma offset at 3, stride at 10, DRM format
-// modifier at 11 (low) and 12 (high) and CbCr offset at 13
+// buffer in GPU memory its (luma) offset at 3, HAL format at 7, stride in
+// pixels at 10, DRM format modifier at 11 (low) and 12 (high) and NV12's
+// CbCr offset at 13
 constexpr int kGrallocMagic = 0x3141592;
 constexpr int kGrallocGpuMemory = 0x2;
 
@@ -170,8 +177,10 @@ class WaydroidDecoder : public SoftVideoDecoderOMXComponent {
 
     int mFd = -1;
     bool mConnected = false;
-    // the host writes 8-bit frames into NV12 buffers in GPU memory
+    // the host writes 8-bit frames into NV12 buffers in GPU memory, and
+    // converts them for RGBA ones
     bool mGpuTargets = false;
+    bool mRgbaTargets = false;
     uint8_t *mShm = nullptr;
     size_t mShmSize = 0;
     const gralloc_module_t *mGralloc = nullptr;
@@ -202,6 +211,8 @@ class WaydroidDecoder : public SoftVideoDecoderOMXComponent {
     bool copyToGraphicBuffer(const hwdec_reply &frame, buffer_handle_t handle);
     // The output color format FRAME needs.
     OMX_COLOR_FORMATTYPE formatFor(const hwdec_reply &frame) const;
+    // The format of 8-bit frames in a surface's buffers.
+    OMX_COLOR_FORMATTYPE nativeFormat() const;
     // Takes on FRAME's HDR10 metadata, telling ACodec when it changes.
     void updateHdrStaticInfo(const hwdec_reply &frame);
     // Returns false if the output port must reconfigure before the frame can
@@ -235,6 +246,7 @@ bool WaydroidDecoder::connectHost(uint32_t codec) {
         return false;
     }
     mGpuTargets = reply.flags & HWDEC_OPEN_GPU_TARGETS;
+    mRgbaTargets = reply.flags & HWDEC_OPEN_RGBA_TARGETS;
     return true;
 }
 
@@ -371,10 +383,15 @@ uint32_t WaydroidDecoder::registerTarget(buffer_handle_t handle) {
     const int *ints = handle->data + handle->numFds;
     if (handle->numFds >= 1 && handle->numInts >= 14 && ints[0] == kGrallocMagic &&
         (ints[1] & kGrallocGpuMemory)) {
-        layout.format = HWDEC_FORMAT_NV12_GPU;
         layout.offset[0] = ints[3];
-        layout.offset[1] = ints[13];
-        layout.stride[0] = layout.stride[1] = ints[10];
+        if (ints[7] == HAL_PIXEL_FORMAT_RGBA_8888) {
+            layout.format = HWDEC_FORMAT_RGBA_GPU;
+            layout.stride[0] = ints[10] * 4;
+        } else {
+            layout.format = HWDEC_FORMAT_NV12_GPU;
+            layout.offset[1] = ints[13];
+            layout.stride[0] = layout.stride[1] = ints[10];
+        }
         layout.modifier_lo = ints[11];
         layout.modifier_hi = ints[12];
         if (!request(HWDEC_REQUEST_REGISTER, &layout, sizeof(layout), nullptr, 0,
@@ -480,8 +497,12 @@ bool WaydroidDecoder::copyToGraphicBuffer(const hwdec_reply &frame, buffer_handl
 
 OMX_COLOR_FORMATTYPE WaydroidDecoder::formatFor(const hwdec_reply &frame) const {
     bool deep = frame.format == HWDEC_FORMAT_I420_10 || frame.format == HWDEC_FORMAT_P010;
-    if (mNativeBuffers) return deep ? kNativeFormat10 : mGpuTargets ? kNativeFormatGpu : kNativeFormat;
+    if (mNativeBuffers) return deep ? kNativeFormat10 : nativeFormat();
     return deep ? OMX_COLOR_FormatYUV420Planar16 : OMX_COLOR_FormatYUV420Planar;
+}
+
+OMX_COLOR_FORMATTYPE WaydroidDecoder::nativeFormat() const {
+    return mRgbaTargets ? kNativeFormatRgba : mGpuTargets ? kNativeFormatGpu : kNativeFormat;
 }
 
 void WaydroidDecoder::updateHdrStaticInfo(const hwdec_reply &frame) {
@@ -587,7 +608,8 @@ OMX_ERRORTYPE WaydroidDecoder::internalGetParameter(OMX_INDEXTYPE index, OMX_PTR
             if (!isValidOMXParam(param)) return OMX_ErrorBadParameter;
             if (param->nPortIndex != kOutputPortIndex) return OMX_ErrorBadPortIndex;
             // GPU memory, unless 10-bit frames need P010 buffers in system memory
-            param->nUsage = mOutputFormat == kNativeFormatGpu ? kNativeUsageGpu : kNativeUsage;
+            bool gpu = mOutputFormat == kNativeFormatGpu || mOutputFormat == kNativeFormatRgba;
+            param->nUsage = gpu ? kNativeUsageGpu : kNativeUsage;
             return OMX_ErrorNone;
         }
         case OMX_IndexParamVideoPortFormat: {
@@ -610,9 +632,7 @@ OMX_ERRORTYPE WaydroidDecoder::internalSetParameter(OMX_INDEXTYPE index, const O
             // ACodec passes the output color format to the surface as its HAL
             // pixel format.
             mNativeBuffers = param->enable;
-            mOutputFormat = !mNativeBuffers ? OMX_COLOR_FormatYUV420Planar
-                            : mGpuTargets  ? kNativeFormatGpu
-                                           : kNativeFormat;
+            mOutputFormat = mNativeBuffers ? nativeFormat() : OMX_COLOR_FormatYUV420Planar;
             updatePortDefinitions();
             clearTargets();
             return OMX_ErrorNone;

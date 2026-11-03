@@ -236,16 +236,18 @@ register_target(struct session *s, const struct hwdec_target *layout)
 
    bool ok = false;
    uint32_t w = layout->width, h = layout->height;
-   if (layout->format == HWDEC_FORMAT_NV12_GPU) {
+   if (layout->format == HWDEC_FORMAT_NV12_GPU || layout->format == HWDEC_FORMAT_RGBA_GPU) {
+      bool nv12 = layout->format == HWDEC_FORMAT_NV12_GPU;
       /* Vulkan checks the layout against the dma-buf when importing it */
-      if (!s->gpu || layout->id < 1 || layout->id > HWDEC_MAX_TARGETS || !w || !h || w % 2 ||
-          h % 2 || w > HWDEC_MAX_DIMENSION || h > HWDEC_MAX_DIMENSION ||
-          layout->stride[1] != layout->stride[0])
+      if (!s->gpu || layout->id < 1 || layout->id > HWDEC_MAX_TARGETS || !w || !h ||
+          w > HWDEC_MAX_DIMENSION || h > HWDEC_MAX_DIMENSION ||
+          (nv12 && (w % 2 || h % 2 || layout->stride[1] != layout->stride[0])))
          goto out;
       struct target *t = &s->targets[layout->id - 1];
       uint64_t modifier = (uint64_t)layout->modifier_hi << 32 | layout->modifier_lo;
       struct gpu_image *img =
-         gpu_import(s->gpu, fd, w, h, modifier, layout->offset, layout->stride[0]);
+         nv12 ? gpu_import(s->gpu, fd, w, h, modifier, layout->offset, layout->stride[0])
+              : gpu_import_rgba(s->gpu, fd, w, h, modifier, layout->offset[0], layout->stride[0]);
       if (!img)
          goto out;
       if (t->map)
@@ -606,8 +608,10 @@ reply_frame(struct session *s, const struct hwdec_output *out)
    /* a frame for a target in GPU memory never leaves it */
    if (fits && t->gpu && gpu_copy(s->gpu, frame, t->gpu, w, h)) {
       struct hwdec_reply reply = frame_reply(s, frame);
-      reply.format = HWDEC_FORMAT_NV12_GPU;
+      reply.format = t->layout.format;
       reply.flags |= HWDEC_FRAME_IN_TARGET;
+      if (reply.format == HWDEC_FORMAT_RGBA_GPU)
+         reply.full_range = 1;
       av_frame_free(&frame);
       return send_reply(s, &reply);
    }
@@ -813,7 +817,8 @@ handle_request(struct session *s, const struct hwdec_request *req)
       }
       struct hwdec_reply reply = {
          .type = HWDEC_REPLY_OK,
-         .flags = s->gpu ? HWDEC_OPEN_GPU_TARGETS : 0,
+         .flags = (s->gpu ? HWDEC_OPEN_GPU_TARGETS : 0) |
+                  (gpu_can_convert(s->gpu) ? HWDEC_OPEN_RGBA_TARGETS : 0),
       };
       return send_reply(s, &reply);
    }

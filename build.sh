@@ -115,8 +115,11 @@ cc -O2 -Wall -Wextra -D_FORTIFY_SOURCE=3 -fstack-protector-strong -fstack-clash-
    $(pkg-config --cflags --libs gbm egl libdrm)
 
 # It parses bitstreams from Android apps, so build it hardened.
+mkdir -p "$build/hwdec"
+glslc -O --target-env=vulkan1.1 -mfmt=c -o "$build/hwdec/nv12_to_rgba.spv.h" \
+   "$here/hwdec/host/nv12_to_rgba.comp"
 cc -O2 -Wall -Wextra -D_FORTIFY_SOURCE=3 -fstack-protector-strong -fstack-clash-protection \
-   -fPIE -pie -Wl,-z,relro,-z,now -pthread \
+   -fPIE -pie -Wl,-z,relro,-z,now -pthread -I"$build/hwdec" \
    -o "$host_out/bin/waydroid-hwdec" "$here/hwdec/host/waydroid-hwdec.c" \
    "$here/hwdec/host/gpu_target.c" $(pkg-config --cflags --libs libavcodec libavutil libswscale vulkan)
 
