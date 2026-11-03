@@ -52,6 +52,9 @@ constexpr int64_t kTaskCheckDelayMs = 250;
 constexpr int64_t kTaskPollMs = 3000;
 constexpr int64_t kLaunchTimeoutMs = 20000;
 constexpr int64_t kScaleWaitMs = 250;
+// How long the monitors a window is on must hold still before Android's refresh rate follows;
+// a window dragged across monitors enters and leaves several.
+constexpr int64_t kRefreshSettleMs = 300;
 // AndroidBridge.resizeDisplay() results
 enum : int { kResizeDone, kResizeRestored, kResizeBroken };
 constexpr int kGrallocMagic = 0x3141592;
@@ -67,6 +70,10 @@ struct native_handle_layout {
     int data[0];
 };
 using GetNativeHandle = const native_handle_layout *(*)(const AHardwareBuffer *);
+
+struct Output {
+    int32_t refresh = 0, pending = 0;
+};
 
 struct {
     wl_display *display = nullptr;
@@ -93,6 +100,13 @@ struct {
     bool tasks_dirty = false;
     int64_t tasks_due = 0;
     int64_t next_task_poll = 0;
+
+    // Current refresh rate of each monitor in mHz, by output and by registry name
+    std::map<wl_output *, Output> outputs;
+    std::map<uint32_t, wl_output *> output_names;
+    bool refresh_dirty = false;
+    int64_t refresh_due = 0;
+    int published_refresh = -1;
 
     GetNativeHandle get_native_handle = nullptr;
 } g;
@@ -527,6 +541,87 @@ void xsurface_configure(void *data, xdg_surface *xs, uint32_t serial) {
 }
 const xdg_surface_listener xsurface_listener = {xsurface_configure};
 
+// ---- Refresh rate ----
+
+void refresh_changed() {
+    if (!g.refresh_dirty) {
+        g.refresh_dirty = true;
+        g.refresh_due = now_ms() + kRefreshSettleMs;
+    }
+}
+
+// Android runs at the fastest monitor showing one of the windows, or with no window at the
+// fastest monitor.
+void publish_refresh() {
+    g.refresh_dirty = false;
+    int refresh = 0;
+    for (auto &[id, w] : g.windows) {
+        if (w->closing)
+            continue;
+        for (wl_output *o : w->outputs)
+            if (auto it = g.outputs.find(o); it != g.outputs.end())
+                refresh = std::max(refresh, int(it->second.refresh));
+    }
+    if (!refresh)
+        for (auto &[o, out] : g.outputs)
+            refresh = std::max(refresh, int(out.refresh));
+    if (refresh <= 0 || refresh == g.published_refresh)
+        return;
+    ALOGI("refresh rate for the windows: %d.%03d Hz", refresh / 1000, refresh % 1000);
+    java.env->CallVoidMethod(java.bridge, java.setRefreshRate, refresh);
+    if (java.check("setRefreshRate"))
+        g.published_refresh = refresh;
+}
+
+void surface_enter(void *data, wl_surface *, wl_output *output) {
+    if (Window *w = window_by_id(uint32_t(uintptr_t(data))); w && w->outputs.insert(output).second)
+        refresh_changed();
+}
+void surface_leave(void *data, wl_surface *, wl_output *output) {
+    if (Window *w = window_by_id(uint32_t(uintptr_t(data))); w && w->outputs.erase(output))
+        refresh_changed();
+}
+const wl_surface_listener surface_listener = {surface_enter, surface_leave};
+
+void output_geometry(void *, wl_output *, int32_t, int32_t, int32_t, int32_t, int32_t, const char *, const char *,
+        int32_t) {}
+void output_mode(void *, wl_output *output, uint32_t flags, int32_t, int32_t, int32_t refresh) {
+    if (flags & WL_OUTPUT_MODE_CURRENT)
+        g.outputs[output].pending = refresh;
+}
+void output_done(void *, wl_output *output) {
+    Output &o = g.outputs[output];
+    if (o.refresh != o.pending) {
+        o.refresh = o.pending;
+        refresh_changed();
+    }
+}
+void output_scale(void *, wl_output *, int32_t) {}
+const wl_output_listener output_listener = {output_geometry, output_mode, output_done, output_scale};
+
+void bind_output(wl_registry *registry, uint32_t name, uint32_t version) {
+    auto *o = static_cast<wl_output *>(wl_registry_bind(registry, name, &wl_output_interface, std::min(version, 3u)));
+    wl_output_add_listener(o, &output_listener, nullptr);
+    g.outputs[o];
+    g.output_names[name] = o;
+}
+
+void remove_output(uint32_t name) {
+    auto it = g.output_names.find(name);
+    if (it == g.output_names.end())
+        return;
+    wl_output *o = it->second;
+    g.output_names.erase(it);
+    g.outputs.erase(o);
+    for (auto &[id, w] : g.windows)
+        w->outputs.erase(o);
+    if (wl_output_get_version(o) >= WL_OUTPUT_RELEASE_SINCE_VERSION)
+        wl_output_release(o);
+    else
+        wl_output_destroy(o);
+    refresh_changed();
+}
+
 Window *create_window(const std::string &pkg, const std::string &title) {
     auto w = std::make_unique<Window>();
     w->id = g.next_window++;
@@ -535,7 +630,7 @@ Window *create_window(const std::string &pkg, const std::string &title) {
     void *tag = reinterpret_cast<void *>(uintptr_t(w->id));
 
     w->surface = wl_compositor_create_surface(g.compositor);
-    wl_surface_set_user_data(w->surface, tag);
+    wl_surface_add_listener(w->surface, &surface_listener, tag);
     w->viewport = wp_viewporter_get_viewport(g.viewporter, w->surface);
     if (g.fractional) {
         w->fractional = wp_fractional_scale_manager_v1_get_fractional_scale(g.fractional, w->surface);
@@ -579,6 +674,8 @@ void destroy_window(Window *w) {
     xdg_toplevel_destroy(w->toplevel);
     xdg_surface_destroy(w->xsurface);
     wl_surface_destroy(w->surface);
+    if (!w->outputs.empty())
+        refresh_changed();
     g.windows.erase(w->id);
 }
 
@@ -736,9 +833,13 @@ void registry_global(void *, wl_registry *registry, uint32_t name, const char *i
                 static_cast<wp_cursor_shape_manager_v1 *>(bind(&wp_cursor_shape_manager_v1_interface, 1)));
     } else if (!strcmp(iface, wl_seat_interface.name)) {
         input_bind_seat(registry, name, version);
+    } else if (!strcmp(iface, wl_output_interface.name)) {
+        bind_output(registry, name, version);
     }
 }
-void registry_remove(void *, wl_registry *, uint32_t) {}
+void registry_remove(void *, wl_registry *, uint32_t name) {
+    remove_output(name);
+}
 const wl_registry_listener registry_listener = {registry_global, registry_remove};
 
 wl_buffer *make_placeholder() {
@@ -819,6 +920,8 @@ int loop(const char *control_path) {
                 due = std::min(due, w->start_due);
         }
         due = std::min(due, input_next_deadline());
+        if (g.refresh_dirty)
+            due = std::min(due, g.refresh_due);
         int timeout = int(std::clamp<int64_t>(due - now, 0, 60000));
 
         while (wl_display_prepare_read(g.display) != 0) {
@@ -885,6 +988,8 @@ int loop(const char *control_path) {
             }
         }
         input_run_timers(now);
+        if (g.refresh_dirty && now >= g.refresh_due)
+            publish_refresh();
         if ((g.tasks_dirty && now >= g.tasks_due) || now >= g.next_task_poll) {
             g.tasks_dirty = false;
             g.next_task_poll = now + kTaskPollMs;
@@ -916,6 +1021,8 @@ void disconnect(const char *control_path) {
     g.dmabuf = nullptr;
     g.placeholder = nullptr;
     g.shm_xbgr = false;
+    g.outputs.clear();
+    g.output_names.clear();
     // A new connection may come with other outputs and scales.
     g.base_scale120 = 0;
     g.last_scale120 = 120;
@@ -950,6 +1057,7 @@ int run(const char *runtime_dir, const char *wayland_display, const char *contro
         ALOGE("compositor lacks wl_compositor, wl_shm, xdg_wm_base or wp_viewporter");
     } else {
         g.placeholder = make_placeholder();
+        refresh_changed();
         status = loop(control_path);
     }
     disconnect(control_path);
@@ -1033,6 +1141,7 @@ extern "C" JNIEXPORT jint JNICALL Java_waydroid_appdisplay_Native_run(JNIEnv *en
             {&java.focusDisplay, "focusDisplay", "(I)V"},
             {&java.injectMotion, "injectMotion", "(IIIIII[I[FFFJ)V"},
             {&java.injectKey, "injectKey", "(IIIIIJ)V"},
+            {&java.setRefreshRate, "setRefreshRate", "(I)V"},
     };
     for (auto &m : methods) {
         *m.id = env->GetMethodID(c, m.name, m.sig);

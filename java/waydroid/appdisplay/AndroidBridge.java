@@ -11,6 +11,7 @@ import android.content.pm.ResolveInfo;
 import android.hardware.display.DisplayManager;
 import android.hardware.display.VirtualDisplay;
 import android.hardware.input.InputManager;
+import android.os.Binder;
 import android.os.Bundle;
 import android.os.IBinder;
 import android.os.Process;
@@ -28,6 +29,9 @@ import java.io.FileReader;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.util.List;
+import java.util.Locale;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 /** Android-side operations the native event loop calls into. All methods run on the loop thread. */
 final class AndroidBridge {
@@ -250,6 +254,54 @@ final class AndroidBridge {
             method(taskManager, "registerTaskStackListener", 1).invoke(taskManager, listener);
         } catch (Throwable t) {
             Log.e(TAG, "registering the task listener failed; windows won't close when apps exit", t);
+        }
+    }
+
+    // ---- Refresh rate ----
+
+    // Settings writes are binder calls to the settings provider; they run off the loop thread, in order.
+    private final ExecutorService settingsWriter = Executors.newSingleThreadExecutor();
+    private int lastRefresh = 0;
+
+    /**
+     * Asks Android to run at {@code mhz}: DisplayModeDirector then picks the composer's config
+     * for that rate. The rate is the current mode of a monitor, which the composer offers.
+     */
+    void setRefreshRate(int mhz) {
+        final String hz = String.format(Locale.ROOT, "%d.%03d", mhz / 1000, mhz % 1000);
+        // The bound in the direction of the change moves first, so the range is never empty
+        final String[] keys = mhz > lastRefresh
+                ? new String[] {"peak_refresh_rate", "min_refresh_rate"}
+                : new String[] {"min_refresh_rate", "peak_refresh_rate"};
+        lastRefresh = mhz;
+        settingsWriter.execute(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    for (String key : keys)
+                        putSystemSetting(key, hz);
+                } catch (Throwable t) {
+                    Log.w(TAG, "can't set the refresh rate to " + hz + " Hz", t);
+                }
+            }
+        });
+    }
+
+    // `settings put` fails as the system user: the provider can't name its calling package.
+    private static void putSystemSetting(String key, String value) throws ReflectiveOperationException {
+        Object am = service("activity", "android.app.IActivityManager");
+        IBinder token = new Binder();
+        Object holder = method(am, "getContentProviderExternal", 4).invoke(am, "settings", 0, token, TAG);
+        if (holder == null)
+            throw new IllegalStateException("no settings provider");
+        try {
+            Object provider = field(holder, "provider").get(holder);
+            Bundle extras = new Bundle();
+            extras.putString("value", value);
+            AttributionSource source = new AttributionSource.Builder(Process.SYSTEM_UID).setPackageName("android").build();
+            method(provider, "call", 5).invoke(provider, source, "settings", "PUT_system", key, extras);
+        } finally {
+            method(am, "removeContentProviderExternalAsUser", 3).invoke(am, "settings", token, 0);
         }
     }
 

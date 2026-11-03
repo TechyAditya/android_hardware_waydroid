@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <map>
 #include <memory>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -72,6 +73,7 @@ struct Window {
     int width = 0, height = 0;
     bool configured = false;
     int scale120 = 0; // 0 until the compositor sends a preferred scale
+    std::set<wl_output *> outputs; // the monitors the window is on
 
     jobject display = nullptr; // VirtualDisplay global ref
     int display_id = -1;
@@ -104,7 +106,7 @@ struct Java {
     JNIEnv *env = nullptr;
     jobject bridge = nullptr;
     jmethodID createDisplay, displayId, resizeDisplay, releaseDisplay, launch, taskCount, removeTasks,
-            focusDisplay, injectMotion, injectKey;
+            focusDisplay, injectMotion, injectKey, setRefreshRate;
     jintArray ids = nullptr;
     jfloatArray xy = nullptr;
 
