@@ -78,6 +78,28 @@ The last step restarts Android, which closes every open Android app.
 
 The installers keep the files and properties they replace. Each part's `uninstall.sh` puts them back.
 
+## Optional: install Widevine L3
+
+Waydroid's image has only the ClearKey DRM, so apps that need Widevine, such as Netflix, refuse protected video. `install-widevine.sh` downloads Google's Widevine service from the prebuilt archive that [waydroid_script](https://github.com/casualsnek/waydroid_script) uses, checks its SHA-256, and copies it into the vendor overlay. The service is a proprietary Google binary, which is why this step is separate.
+
+Widevine here runs at security level L3, in software. Streaming services usually limit L3 devices to standard definition.
+
+1. Install Widevine. The script restarts a running Waydroid container, which closes every open Android app:
+
+   ```sh
+   sudo ./waydroid-venus/install-widevine.sh
+   ```
+
+2. Check that Android can start the Widevine service:
+
+   ```sh
+   sudo waydroid shell -- sh -c 'start vendor.drm-widevine-hal; sleep 1; service check android.hardware.drm.IDrmFactory/widevine'
+   ```
+
+   The output ends with `found`.
+
+To remove Widevine, run `sudo ./waydroid-venus/uninstall-widevine.sh`. It also restarts the container.
+
 ## Run
 
 - To open an app in its own window, run `waydroid app launch PACKAGE`, for example `waydroid app launch com.google.android.youtube`. Waydroid's desktop entries run the same command, so app launchers open separate windows too.
@@ -163,9 +185,10 @@ After a Waydroid image update, run `stack/build.sh` and `sudo ./stack/install.sh
 
 ## Uninstall
 
-Run the uninstallers in the reverse order, then restart Android:
+Run the uninstallers in the reverse order, then restart Android. Skip the Widevine line if you did not install it:
 
 ```sh
+sudo ./waydroid-venus/uninstall-widevine.sh
 sudo ./waydroid-app-displays/uninstall.sh
 sudo ./stack/uninstall.sh
 sudo ./waydroid-venus/uninstall.sh
