@@ -561,6 +561,8 @@ luma_coefficients(const AVFrame *frame, float *kr, float *kb)
    case AVCOL_SPC_SMPTE240M:
       *kr = 0.212f, *kb = 0.087f;
       return;
+   /* constant luminance gets the non-constant matrix, which is close; 8-bit
+    * video in it is rare */
    case AVCOL_SPC_BT2020_NCL:
    case AVCOL_SPC_BT2020_CL:
       *kr = 0.2627f, *kb = 0.0593f;
@@ -865,6 +867,10 @@ gpu_copy(struct gpu_ctx *g, const AVFrame *frame, struct gpu_image *img, uint32_
       vkf->sem_value[i]++;
    }
    ok = g->WaitForFences(g->dev, 1, &g->fence, VK_TRUE, COPY_TIMEOUT_NS) == VK_SUCCESS;
+   /* the frame is late, but the views and the command buffer stay in use
+    * until the GPU finishes or the device is lost */
+   if (!ok)
+      g->WaitForFences(g->dev, 1, &g->fence, VK_TRUE, UINT64_MAX);
 
 out:
    for (int i = 0; i < 2; i++) {
