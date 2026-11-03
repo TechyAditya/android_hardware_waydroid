@@ -27,6 +27,7 @@
 
 #include "cursor-shape-v1-client-protocol.h"
 #include "fractional-scale-v1-client-protocol.h"
+#include "linux-dmabuf-v1-client-protocol.h"
 #include "viewporter-client-protocol.h"
 #include "xdg-shell-client-protocol.h"
 
@@ -54,6 +55,12 @@ constexpr int64_t kScaleWaitMs = 250;
 // AndroidBridge.resizeDisplay() results
 enum : int { kResizeDone, kResizeRestored, kResizeBroken };
 constexpr int kGrallocMagic = 0x3141592;
+// gralloc.default's private_handle_t::PRIV_FLAGS_GPU_MEMORY
+constexpr int kGrallocGpuMemory = 0x2;
+constexpr uint32_t kDrmFormatXbgr8888 = 0x34324258; // 'XB24'
+constexpr uint32_t kDrmFormatAbgr8888 = 0x34324241; // 'AB24'
+// AHARDWAREBUFFER_USAGE_VENDOR_0: gralloc allocates the buffer in GPU memory
+constexpr uint64_t kUsageGpuMemory = 1ull << 28;
 
 struct native_handle_layout {
     int version, numFds, numInts;
@@ -69,6 +76,7 @@ struct {
     xdg_wm_base *wm_base = nullptr;
     wp_viewporter *viewporter = nullptr;
     wp_fractional_scale_manager_v1 *fractional = nullptr;
+    zwp_linux_dmabuf_v1 *dmabuf = nullptr;
     bool shm_xbgr = false;
     wl_buffer *placeholder = nullptr;
 
@@ -134,13 +142,30 @@ wl_buffer *wrap_buffer(AHardwareBuffer *hb, BufEntry *entry) {
     AHardwareBuffer_Desc desc;
     AHardwareBuffer_describe(hb, &desc);
     const native_handle_layout *h = g.get_native_handle ? g.get_native_handle(hb) : nullptr;
-    // gralloc.default's private_handle_t: one memfd, then magic, flags, size, offset, ...
+    // gralloc.default's private_handle_t: one fd, then magic, flags, size, offset, ...,
+    // and for a buffer in GPU memory its DRM format modifier at 11 (low) and 12 (high).
     if (!h || h->numFds < 1 || h->numInts < 4 || h->data[h->numFds] != kGrallocMagic) {
         ALOGE("buffer isn't from gralloc.default; can't share it with the compositor");
         return nullptr;
     }
+    const int *ints = h->data + h->numFds;
     int fd = h->data[0];
-    int offset = h->data[h->numFds + 3];
+    int offset = ints[3];
+    if ((ints[1] & kGrallocGpuMemory) && h->numInts >= 13) {
+        if (!g.dmabuf) {
+            ALOGE("the compositor lacks zwp_linux_dmabuf_v1 for buffers in GPU memory");
+            return nullptr;
+        }
+        bool opaque = desc.format == AHARDWAREBUFFER_FORMAT_R8G8B8X8_UNORM || g.shm_xbgr;
+        zwp_linux_buffer_params_v1 *params = zwp_linux_dmabuf_v1_create_params(g.dmabuf);
+        zwp_linux_buffer_params_v1_add(params, fd, 0, uint32_t(offset), desc.stride * 4, uint32_t(ints[12]),
+                uint32_t(ints[11]));
+        wl_buffer *b = zwp_linux_buffer_params_v1_create_immed(params, int32_t(desc.width), int32_t(desc.height),
+                opaque ? kDrmFormatXbgr8888 : kDrmFormatAbgr8888, 0);
+        zwp_linux_buffer_params_v1_destroy(params);
+        wl_buffer_add_listener(b, &buffer_listener, entry);
+        return b;
+    }
     struct stat st;
     if (fstat(fd, &st) < 0 || st.st_size <= 0)
         return nullptr;
@@ -176,7 +201,7 @@ Reader *new_reader(Window *w, int width, int height) {
     r->width = width;
     r->height = height;
     media_status_t s = AImageReader_newWithUsage(width, height, AIMAGE_FORMAT_RGBA_8888,
-            AHARDWAREBUFFER_USAGE_GPU_SAMPLED_IMAGE | AHARDWAREBUFFER_USAGE_CPU_READ_RARELY, kImages, &r->reader);
+            AHARDWAREBUFFER_USAGE_GPU_SAMPLED_IMAGE | kUsageGpuMemory, kImages, &r->reader);
     if (s != AMEDIA_OK) {
         ALOGE("AImageReader_newWithUsage(%dx%d) failed: %d", width, height, s);
         return nullptr;
@@ -697,6 +722,8 @@ void registry_global(void *, wl_registry *registry, uint32_t name, const char *i
     } else if (!strcmp(iface, xdg_wm_base_interface.name)) {
         g.wm_base = static_cast<xdg_wm_base *>(bind(&xdg_wm_base_interface, 5));
         xdg_wm_base_add_listener(g.wm_base, &wm_listener, nullptr);
+    } else if (!strcmp(iface, zwp_linux_dmabuf_v1_interface.name)) {
+        g.dmabuf = static_cast<zwp_linux_dmabuf_v1 *>(bind(&zwp_linux_dmabuf_v1_interface, 3));
     } else if (!strcmp(iface, wp_viewporter_interface.name)) {
         g.viewporter = static_cast<wp_viewporter *>(bind(&wp_viewporter_interface, 1));
     } else if (!strcmp(iface, wp_fractional_scale_manager_v1_interface.name)) {
@@ -883,6 +910,7 @@ void disconnect(const char *control_path) {
     g.wm_base = nullptr;
     g.viewporter = nullptr;
     g.fractional = nullptr;
+    g.dmabuf = nullptr;
     g.placeholder = nullptr;
     g.shm_xbgr = false;
     // A new connection may come with other outputs and scales.
