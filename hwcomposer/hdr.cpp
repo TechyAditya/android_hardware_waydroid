@@ -723,9 +723,11 @@ int hdr_apply_layer_to_window(waydroid_hwc_composer_device_1 *pdev, hwc_layer_1 
     state->shown = source;
     wl_surface_damage(state->layer.surface, 0, 0, INT32_MAX, INT32_MAX);
     state->layer.set_crop({0, 0, static_cast<float>(cv.out_width), static_cast<float>(cv.out_height)});
-    state->layer.set_display_frame(layer->displayFrame, display->scale);
-    state->layer.set_position(floor(layer->displayFrame.left / display->scale),
-                              floor(layer->displayFrame.top / display->scale));
+    double scale_x, scale_y;
+    effective_scale(display, &scale_x, &scale_y);
+    state->layer.set_display_frame(layer->displayFrame, scale_x, scale_y);
+    state->layer.set_position(floor(layer->displayFrame.left / scale_x),
+                              floor(layer->displayFrame.top / scale_y));
     wl_surface_commit(state->layer.surface);
 
     display->layers[state->layer.surface] = {
