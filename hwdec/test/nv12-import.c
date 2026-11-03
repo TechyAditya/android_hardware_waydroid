@@ -7,10 +7,14 @@
  * build: cc -O2 -o nv12-import nv12-import.c $(pkg-config --cflags --libs gbm libdrm vulkan)
  * usage: nv12-import [WIDTH HEIGHT COUNT]   (default 1920 1080 40)
  * env:   SPLIT=1 imports each plane as an image of its own instead, R8 and R8G8
+ *        LIST=1 passes only the modifier and lets the driver choose the plane layout; it prints
+ *        any plane whose layout differs from GBM's
  *
  * On NVIDIA 615 at 1920x1080, buffers 6, 32 and 38 of 40 read back wrong; at 2560x1440, 1, 11,
- * 17, 27 and 33.  The same buffers imported as one R8 and one R8G8 image per plane read back
- * correctly.
+ * 17, 27 and 33, with LIST=1 too.  At 2560x40, 48 and 64, every buffer reads back wrong unless
+ * LIST=1 is set, and the explicit layout gets a smaller memory requirement than the same layout
+ * chosen by the driver.  The same buffers imported as one R8 and one R8G8 image per plane read
+ * back correctly.
  */
 #define _GNU_SOURCE
 #include <drm_fourcc.h>
@@ -132,9 +136,15 @@ import_nv12(struct gbm_bo *bo, uint32_t width, uint32_t height, int plane)
       .drmFormatModifierPlaneCount = plane < 0 ? 2 : 1,
       .pPlaneLayouts = plane < 0 ? planes : &planes[plane],
    };
+   const uint64_t drm_modifier = gbm_bo_get_modifier(bo);
+   const VkImageDrmFormatModifierListCreateInfoEXT modifier_list = {
+      .sType = VK_STRUCTURE_TYPE_IMAGE_DRM_FORMAT_MODIFIER_LIST_CREATE_INFO_EXT,
+      .drmFormatModifierCount = 1,
+      .pDrmFormatModifiers = &drm_modifier,
+   };
    const VkExternalMemoryImageCreateInfo external = {
       .sType = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO,
-      .pNext = &modifier,
+      .pNext = plane < 0 && getenv("LIST") ? (const void *)&modifier_list : &modifier,
       .handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT,
    };
    const VkImageCreateInfo info = {
@@ -155,6 +165,22 @@ import_nv12(struct gbm_bo *bo, uint32_t width, uint32_t height, int plane)
    VkImage image;
    CHECK(vkCreateImage(dev, &info, NULL, &image));
 
+   /* A layout the driver chose only describes the dma-buf if it matches GBM's */
+   if (external.pNext == &modifier_list) {
+      for (int p = 0; p < 2; p++) {
+         const VkImageSubresource sub = {
+            .aspectMask = p ? VK_IMAGE_ASPECT_MEMORY_PLANE_1_BIT_EXT
+                            : VK_IMAGE_ASPECT_MEMORY_PLANE_0_BIT_EXT,
+         };
+         VkSubresourceLayout got;
+         vkGetImageSubresourceLayout(dev, image, &sub, &got);
+         if (got.offset != planes[p].offset || got.rowPitch != planes[p].rowPitch)
+            printf("plane %d: driver layout offset %llu pitch %llu, GBM offset %llu pitch %llu\n", p,
+                   (unsigned long long)got.offset, (unsigned long long)got.rowPitch,
+                   (unsigned long long)planes[p].offset, (unsigned long long)planes[p].rowPitch);
+      }
+   }
+
    int fd = gbm_bo_get_fd(bo);
    VkMemoryRequirements req;
    vkGetImageMemoryRequirements(dev, image, &req);
@@ -174,6 +200,9 @@ import_nv12(struct gbm_bo *bo, uint32_t width, uint32_t height, int plane)
    };
    /* a plane imported alone starts at its offset, so the import covers the whole dma-buf */
    off_t fd_size = lseek(fd, 0, SEEK_END);
+   if (plane < 0 && req.size < (VkDeviceSize)fd_size)
+      printf("memory requirement %llu, dma-buf size %lld\n", (unsigned long long)req.size,
+             (long long)fd_size);
    const VkMemoryAllocateInfo alloc = {
       .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
       .pNext = &import,
@@ -213,7 +242,9 @@ main(int argc, char **argv)
    else
       printf("%s, driver 0x%x", props.deviceName, v);
    printf(", %ux%u, %d buffers imported as %s\n", width, height, count,
-          getenv("SPLIT") ? "one image per plane" : "two-plane images");
+          getenv("SPLIT")  ? "one image per plane"
+          : getenv("LIST") ? "two-plane images, layout chosen by the driver"
+                           : "two-plane images");
 
    const float priority = 1;
    const VkDeviceQueueCreateInfo queue_info = {
