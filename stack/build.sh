@@ -75,7 +75,10 @@ if [[ ! -e $W/.fetched ]]; then
         curl -fsSL --create-dirs -o "$A/$f" \
             "https://raw.githubusercontent.com/LineageOS/android_hardware_interfaces/$INTERFACES_SHA/graphics/composer/2.1/utils/hwc2on1adapter/$f"
     done
+    # Its own repository, or git apply resolves paths against this checkout and skips every file.
+    git init -q "$A"
     for p in "$HERE"/patches/hwc2on1adapter/*.patch; do git -C "$A" apply -p6 "$p"; done
+    grep -q waydroid_hwc_get_hdr_capabilities "$A/HWC2On1Adapter.cpp" || { echo "Adapter patches did not apply." >&2; exit 1; }
     touch "$W/.fetched"
 fi
 
