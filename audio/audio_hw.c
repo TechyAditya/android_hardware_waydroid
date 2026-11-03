@@ -153,14 +153,22 @@ static void select_devices(struct alsa_audio_device *adev)
     ALOGV("hp=%c speaker=%c headset-mic=%c", headphones_on ? 'y' : 'n', speaker_on ? 'y' : 'n', headset_mic_on ? 'y' : 'n');
 }
 
-/* The ALSA buffer holds PLAYBACK_PERIOD_COUNT periods at the 48 kHz rate, about 85 ms. Scale it
- * with the stream rate so higher rates keep the same duration instead of shrinking it. */
-static snd_pcm_uframes_t playback_buffer_frames(const struct alsa_stream_out *out)
+/* A period is PLAYBACK_PERIOD_SIZE frames at the 48 kHz rate, about 21 ms. Scale it with the stream
+ * rate so higher rates keep the same duration instead of shrinking it. A period much shorter than
+ * AudioFlinger's normal mix makes it add a fast mixer, whose late cycles play as gaps. Rounded up
+ * to the multiple of 16 frames AudioFlinger expects. */
+static snd_pcm_uframes_t playback_period_frames(const struct alsa_stream_out *out)
 {
-    uint64_t frames = (uint64_t)out->config.period_size * out->config.period_count;
+    uint64_t frames = out->config.period_size;
     if (out->config.rate > PLAYBACK_CODEC_SAMPLING_RATE)
         frames = (frames * out->config.rate + PLAYBACK_CODEC_SAMPLING_RATE - 1) / PLAYBACK_CODEC_SAMPLING_RATE;
-    return frames;
+    return (frames + 15) / 16 * 16;
+}
+
+/* The ALSA buffer holds PLAYBACK_PERIOD_COUNT periods, about 85 ms. */
+static snd_pcm_uframes_t playback_buffer_frames(const struct alsa_stream_out *out)
+{
+    return playback_period_frames(out) * out->config.period_count;
 }
 
 /* must be called with hw device and output stream mutexes locked */
@@ -279,11 +287,8 @@ static int out_set_sample_rate(struct audio_stream *stream, uint32_t rate)
 
 static size_t out_get_buffer_size(const struct audio_stream *stream)
 {
-    /* return the closest majoring multiple of 16 frames, as
-     * audioflinger expects audio buffers to be a multiple of 16 frames */
-    size_t size = PLAYBACK_PERIOD_SIZE;
-    size = ((size + 15) / 16) * 16;
-    size = size * audio_stream_out_frame_size((struct audio_stream_out *)stream);
+    struct alsa_stream_out *out = (struct alsa_stream_out *)stream;
+    size_t size = playback_period_frames(out) * audio_stream_out_frame_size((struct audio_stream_out *)stream);
     ALOGV("out_get_buffer_size: %zu", size);
     return size;
 }
