@@ -24,7 +24,8 @@ fetch() {
    local url=$1 commit=$2 dir=$3 patch=$4
    if [ -d "$dir" ]; then
       if [ "$(git -C "$dir" rev-parse HEAD)" != "$commit" ] ||
-         ! git -C "$dir" diff | cmp -s - "$patch"; then
+         ! git -C "$dir" diff HEAD | cmp -s - "$patch" ||
+         [ -n "$(git -C "$dir" ls-files --others --exclude-standard)" ]; then
          echo "$dir does not match $(basename "$patch"); remove it to rebuild" >&2
          exit 1
       fi
