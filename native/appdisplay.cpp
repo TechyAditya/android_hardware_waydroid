@@ -200,8 +200,11 @@ Reader *new_reader(Window *w, int width, int height) {
     r->gen = w->next_gen++;
     r->width = width;
     r->height = height;
-    media_status_t s = AImageReader_newWithUsage(width, height, AIMAGE_FORMAT_RGBA_8888,
-            AHARDWAREBUFFER_USAGE_GPU_SAMPLED_IMAGE | kUsageGpuMemory, kImages, &r->reader);
+    // GPU memory only reaches the compositor as dma-bufs; without them, ask for buffers it can
+    // map through wl_shm.
+    const uint64_t usage = AHARDWAREBUFFER_USAGE_GPU_SAMPLED_IMAGE |
+            (g.dmabuf ? kUsageGpuMemory : AHARDWAREBUFFER_USAGE_CPU_READ_RARELY);
+    media_status_t s = AImageReader_newWithUsage(width, height, AIMAGE_FORMAT_RGBA_8888, usage, kImages, &r->reader);
     if (s != AMEDIA_OK) {
         ALOGE("AImageReader_newWithUsage(%dx%d) failed: %d", width, height, s);
         return nullptr;
