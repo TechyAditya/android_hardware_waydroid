@@ -9,7 +9,7 @@ What this fork plans to send to Waydroid, in plain words. Open so far: [#92](htt
 5. **No audio crackles at high sample rates.** A comment on [#91](https://github.com/waydroid/android_hardware_waydroid/pull/91), someone else's open audio PR, which already has half of the fix. [Draft](#5-audio-at-high-sample-rates)
 6. **Video buffers in GPU memory go straight to the compositor.** On hold: upstream has nothing that creates those buffers yet. [Note](#6-gpu-memory-buffers-as-dma-bufs)
 7. **Bug report to NVIDIA.** Their driver misreads some video buffers, which shows as green or colourless frames. Ready, with a small program that shows the bug. [Draft](#7-nvidia-misreads-two-plane-nv12-imports)
-8. **Washed-out SDR video.** Android brightens the dark parts of ordinary video. On hold until it is confirmed on stock Waydroid. [Note](#8-washed-out-sdr-video)
+8. **Washed-out SDR video.** Android brightens the dark parts of ordinary video, and stock Waydroid does it too. One issue, ready. [Draft](#8-washed-out-sdr-video)
 
 Every head branch below starts from upstream `lineage-20` and is on `TechyAditya/android_hardware_waydroid` unless it says otherwise. Each one compiles alone with `stack/build.sh`. The changes ran together in the `all-fixes` build, not branch by branch. To open a pull request from a draft, save the body to a file and run:
 
@@ -315,6 +315,38 @@ Waydroid's compositor reads Android's video buffers this way through Venus, so s
 
 ## 8. Washed-out SDR video
 
-On hold until it is confirmed on stock Waydroid. In this fork's build, Android lifted the shadows of SDR video. A grey bar at 17 of 255 reached the screen at 31, and one at 34 at 50. The lift followed the layer's SMPTE 170M dataspace, not the pixels: the same frames tagged as sRGB showed correctly. Setting `debug.sf.treat_170m_as_sRGB` did not change it. This fork works around it in its host decoder, which tags SDR video as sRGB, as Chromium does on Android.
+Confirmed on stock components on 2026-11-04, with the grey-bar clip from `waydroid-venus/hwdec/test/ramp-check.sh` played in Just Player. The setup was the upstream `lineage-20` composer, software rendering through SwiftShader, and this fork's decoder writing YV12 into system memory, with only the transfer it reports changed between runs. The fork's gralloc and SurfaceFlinger null check were in place too, because stock `gralloc.default` cannot allocate YV12 (#2460) and stock SurfaceFlinger crashed when the player window opened (#2464). Neither touches colour.
 
-To check stock Waydroid, play a video in an Android player with the stock decoders, then run `waydroid-venus/hwdec/test/ramp-check.sh`. If the dark bars read high, write the issue with those numbers. Name the composition path the video layer takes (`dumpsys SurfaceFlinger`, the layer's `composition type`), because the lift happens after the decoder.
+Stock decoders cannot show the bug on NVIDIA: they fail on the YV12 allocation, or fall back to RGB_565, which converts on the CPU before SurfaceFlinger. It should show on Intel and AMD, where the stock decoders output YUV, but that is untested. Where Android converts the curve is not pinned down. The upstream composer has no colour code, and the layer was a device layer.
+
+Title: `[BUG] SDR video looks washed out: video tagged SMPTE 170M shows with lifted shadows`
+
+```markdown
+**Describe the bug**
+
+Ordinary SDR video looks washed out and banded in dark scenes compared with the same video in a browser. Android names the transfer of BT.709 and BT.601 video SMPTE 170M, and with that dataspace the dark levels reach the screen brighter than they are in the stream: the shape of a SMPTE 170M to sRGB conversion. The same frames tagged as sRGB show correctly.
+
+I measured it with a clip of 16 grey bars (BT.709, limited range), played in Just Player, on the upstream lineage-20 composer with software rendering. The decoder writes YV12 into system memory, and only the transfer it reports changes between the two runs:
+
+| Bar value | 17 | 34 | 51 | 68 | 102 | 136 |
+| --- | --- | --- | --- | --- | --- | --- |
+| Tagged SMPTE 170M (what Android's decoders report) | 32 | 50 | 66 | 83 | 115 | 146 |
+| Tagged sRGB | 16 | 34 | 50 | 68 | 101 | 135 |
+
+17 becoming 32 is the SMPTE 170M curve decoded and then encoded as sRGB. The slope near black is about 3 times steeper, which also spreads dark gradients into visible bands.
+
+`debug.sf.treat_170m_as_sRGB=true`, Android 13's switch for this, did not change it. Chromium tags SDR video as sRGB on Android for the same reason.
+
+**To reproduce**
+
+1. Make the clip: `ffmpeg -f lavfi -i color=black:s=1920x1080:r=30:d=30 -vf "geq=lum='16+floor(X*16/W)*219/15':cb=128:cr=128,format=yuv420p" -c:v libx264 -qp 2 -bsf:v h264_metadata=colour_primaries=1:transfer_characteristics=1:matrix_coefficients=1:video_full_range_flag=0 ramp.mp4`
+2. Play it in an Android player whose decoder outputs YUV to the surface.
+3. Read the bar values from a host screenshot. The second bar should be 17.
+
+On NVIDIA with stock images, the stock decoders cannot output YUV, because `gralloc.default` cannot allocate YV12 (#2460), so I measured with a host decoder. I expect Intel and AMD with `gralloc=gbm` to show it with the stock decoders, but have not tested them.
+
+**General information**
+
+- Waydroid 1.6.3, LineageOS 20 images (system 20260927, vendor 20261022)
+- Hyprland 0.57 on CachyOS, NVIDIA RTX 3060 Laptop GPU (driver 615)
+```
