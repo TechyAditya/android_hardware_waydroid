@@ -72,6 +72,12 @@ DESTDIR="$host_out.tmp" ninja -C "$build/virglrenderer/build" install
 mv "$host_out.tmp$prefix" "$host_out"
 rm -rf "$host_out.tmp"
 
+# Allocates gralloc render buffers in GPU memory; see alloc/protocol.h.
+cc -O2 -Wall -Wextra -D_FORTIFY_SOURCE=3 -fstack-protector-strong -fstack-clash-protection \
+   -fPIE -pie -Wl,-z,relro,-z,now \
+   -o "$host_out/bin/waydroid-alloc" "$here/alloc/waydroid-alloc.c" \
+   $(pkg-config --cflags --libs gbm egl libdrm)
+
 ndk_bin=$ndk/toolchains/llvm/prebuilt/linux-x86_64/bin
 gralloc_src=$build/libhardware/modules/gralloc
 
@@ -122,7 +128,7 @@ EOF
    # Waydroid uses 4 KiB pages.
    "$ndk_bin/$triple$android_api-clang++" -shared -fPIC -O2 -std=c++17 \
       -static-libstdc++ -DPAGE_SIZE=4096 -DLOG_TAG='"gralloc"' \
-      -I"$here/gralloc/include" -I"$build/mesa/include/android_stub" -I"$gralloc_src" \
+      -I"$here/gralloc/include" -I"$here/alloc" -I"$build/mesa/include/android_stub" -I"$gralloc_src" \
       -o "$build/out/$lib/gralloc.default.so" \
       "$gralloc_src/gralloc.cpp" "$gralloc_src/mapper.cpp" "$here/gralloc/framebuffer_stub.cpp" \
       -L"$mesa_build/src/android_stub" -lcutils -llog
@@ -130,4 +136,5 @@ EOF
 done
 
 echo "render server: $host_out/bin/virgl_test_server"
+echo "GPU memory allocator: $host_out/bin/waydroid-alloc"
 echo "android libraries: $build/out/lib64 $build/out/lib"

@@ -16,6 +16,7 @@ cfg=/var/lib/waydroid/waydroid.cfg
 # property values from before the first install, for uninstall.sh
 backup=/var/lib/waydroid/waydroid-venus-properties.json
 unit=/etc/systemd/system/waydroid-venus.service
+alloc_unit=/etc/systemd/system/waydroid-alloc.service
 sysusers=/etc/sysusers.d/waydroid-venus.conf
 socket_dir=$home/.local/share/waydroid/data/venus
 # earlier versions ran the server as a user service
@@ -31,9 +32,9 @@ done
 
 missing=0
 for file in "${modules[@]/#/$out/}" \
-   "$host/bin/virgl_test_server" "$host/libexec/virgl_render_server" \
+   "$host/bin/virgl_test_server" "$host/libexec/virgl_render_server" "$host/bin/waydroid-alloc" \
    "$here/android/waydroid-venus-recover.sh" "$here/android/waydroid-venus.rc" \
-   "$here/waydroid-venus.service" "$here/waydroid-venus.sysusers"; do
+   "$here/waydroid-venus.service" "$here/waydroid-alloc.service" "$here/waydroid-venus.sysusers"; do
    if [ ! -f "$file" ]; then
       echo "missing $file" >&2
       missing=1
@@ -46,6 +47,8 @@ done
 tx=$(mktemp -d)
 was_active=$(systemctl is-active waydroid-venus.service 2> /dev/null || true)
 was_enabled=$(systemctl is-enabled waydroid-venus.service 2> /dev/null || true)
+alloc_was_active=$(systemctl is-active waydroid-alloc.service 2> /dev/null || true)
+alloc_was_enabled=$(systemctl is-enabled waydroid-alloc.service 2> /dev/null || true)
 legacy_stopped=0
 save() {
    local path
@@ -62,8 +65,9 @@ save() {
 rollback() {
    trap - ERR
    echo "installation failed, restoring the previous state" >&2
-   systemctl stop waydroid-venus.service 2> /dev/null || true
+   systemctl stop waydroid-venus.service waydroid-alloc.service 2> /dev/null || true
    [ "$was_enabled" = enabled ] || systemctl disable waydroid-venus.service 2> /dev/null || true
+   [ "$alloc_was_enabled" = enabled ] || systemctl disable waydroid-alloc.service 2> /dev/null || true
    if [ -f "$tx/absent" ]; then
       while read -r path; do rm -rf "$path"; done < "$tx/absent"
    fi
@@ -75,6 +79,7 @@ rollback() {
    fi
    systemctl daemon-reload
    [ "$was_active" = active ] && systemctl start waydroid-venus.service
+   [ "$alloc_was_active" = active ] && systemctl start waydroid-alloc.service
    if [ "$legacy_stopped" = 1 ]; then
       systemctl --user -M "$user@" start waydroid-venus.service || true
    fi
@@ -83,7 +88,7 @@ rollback() {
 }
 trap rollback ERR
 
-save "$prefix" "$cfg" "$backup" "$unit" "$sysusers" "${overlay_files[@]}" \
+save "$prefix" "$cfg" "$backup" "$unit" "$alloc_unit" "$sysusers" "${overlay_files[@]}" \
    "$overlay/bin/waydroid-venus-recover.sh" "$overlay/etc/init/waydroid-venus.rc"
 
 install -D -m 0644 "$here/waydroid-venus.sysusers" "$sysusers"
@@ -137,16 +142,23 @@ if [ "$legacy" = 1 ]; then
    legacy_stopped=1
 fi
 
-sed -e "s|@PREFIX@|$prefix|g" -e "s|@SOCKET_DIR@|$socket_dir|g" -e "s|@USER@|$user|g" \
-   "$here/waydroid-venus.service" > "$unit"
+for service in waydroid-venus waydroid-alloc; do
+   sed -e "s|@PREFIX@|$prefix|g" -e "s|@SOCKET_DIR@|$socket_dir|g" -e "s|@USER@|$user|g" \
+      "$here/$service.service" > "/etc/systemd/system/$service.service"
+done
 systemctl daemon-reload
-systemctl enable waydroid-venus.service
-systemctl restart waydroid-venus.service
+systemctl enable waydroid-venus.service waydroid-alloc.service
+systemctl restart waydroid-venus.service waydroid-alloc.service
 for _ in $(seq 50); do
    [ -S "$socket_dir/vtest.sock" ] && [ "$(stat -c %a "$socket_dir/vtest.sock")" = 666 ] && break
    sleep 0.2
 done
 [ "$(stat -c %a "$socket_dir/vtest.sock" 2> /dev/null)" = 666 ]
+for _ in $(seq 50); do
+   [ -S "$socket_dir/alloc.sock" ] && break
+   sleep 0.2
+done
+[ -S "$socket_dir/alloc.sock" ]
 
 # regenerates waydroid_base.prop and restarts a running container
 waydroid upgrade --offline

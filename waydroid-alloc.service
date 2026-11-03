@@ -1,0 +1,54 @@
+[Unit]
+Description=GPU memory allocator for Waydroid (render buffers Android shares with the compositor)
+Before=waydroid-container.service
+
+[Service]
+User=waydroid-venus
+Group=waydroid-venus
+Environment=__GL_SHADER_DISK_CACHE_PATH=/var/cache/waydroid-venus
+CacheDirectory=waydroid-venus
+# The socket directory belongs to the Waydroid user; see waydroid-venus.service.
+ExecStartPre=+/usr/bin/install -d -o @USER@ -g @USER@ -m 0755 @SOCKET_DIR@
+ExecStartPre=+/usr/bin/setfacl -m u:waydroid-venus:rwx @SOCKET_DIR@
+ExecStartPre=+/usr/bin/rm -f @SOCKET_DIR@/alloc.sock
+# Only Android's allocator HAL, which runs as AID_SYSTEM, may connect.
+ExecStart=@PREFIX@/bin/waydroid-alloc --socket-path @SOCKET_DIR@/alloc.sock --allowed-uid 1000
+Restart=always
+RestartSec=1
+
+ProtectHome=tmpfs
+BindPaths=@SOCKET_DIR@
+InaccessiblePaths=-/run/dbus
+ProtectSystem=strict
+PrivateTmp=yes
+PrivateNetwork=yes
+PrivateIPC=yes
+DevicePolicy=closed
+DeviceAllow=char-nvidia rw
+DeviceAllow=char-nvidiactl rw
+DeviceAllow=char-nvidia-modeset rw
+DeviceAllow=char-drm rw
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+RestrictAddressFamilies=AF_UNIX
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+SystemCallErrorNumber=EPERM
+UMask=0077
+TasksMax=64
+MemoryMax=1G
+
+[Install]
+WantedBy=multi-user.target

@@ -51,8 +51,8 @@ done
 rm -f "$overlay/bin/waydroid-venus-recover.sh" "$overlay/etc/init/waydroid-venus.rc"
 waydroid upgrade --offline
 
-systemctl disable --now waydroid-venus.service 2> /dev/null || true
-rm -f "$unit"
+systemctl disable --now waydroid-venus.service waydroid-alloc.service 2> /dev/null || true
+rm -f "$unit" /etc/systemd/system/waydroid-alloc.service
 systemctl daemon-reload
 # the directory is shared with other services' sockets
 rm -f "$socket_dir/vtest.sock"
