@@ -7,9 +7,13 @@
  *
  * When ACodec renders to a surface, the output buffers are the surface's
  * gralloc buffers, and the host writes frames straight into them: 8-bit
- * frames into NV12 buffers in GPU memory by a copy on the GPU, if the host
- * can, else into YV12 buffers, and 10-bit frames into P010 buffers.
- * Otherwise frames come back in shared memory and are copied out.
+ * frames into RGBA or NV12 buffers in GPU memory if the host can, otherwise
+ * into YV12 buffers, and 10-bit frames into P010 buffers.  On NVIDIA, which
+ * misreads some NV12 buffers when SurfaceFlinger samples them (green or
+ * colourless frames), the host converts 8-bit frames to RGBA instead.
+ * persist.waydroid.video_sdr_output picks the format of 8-bit frames: auto
+ * (default), rgba, nv12 or system (YV12).  Without a surface, frames come
+ * back in shared memory and are copied out.
  */
 #define LOG_TAG "WaydroidDecoder"
 
@@ -22,6 +26,7 @@
 #include <sys/un.h>
 #include <unistd.h>
 
+#include <cutils/properties.h>
 #include <hardware/gralloc.h>
 #include <log/log.h>
 #include <media/hardware/HardwareAPI.h>
@@ -51,12 +56,47 @@ constexpr uint32_t kNativeUsage = GRALLOC_USAGE_SW_WRITE_OFTEN;
 // GRALLOC_USAGE_PRIVATE_0 alone as NV12 in GPU memory
 constexpr OMX_COLOR_FORMATTYPE kNativeFormatGpu =
         static_cast<OMX_COLOR_FORMATTYPE>(HAL_PIXEL_FORMAT_YCbCr_420_888);
+// and RGBA_8888 in GPU memory for any usage that leaves out the CPU
+constexpr OMX_COLOR_FORMATTYPE kNativeFormatRgba =
+        static_cast<OMX_COLOR_FORMATTYPE>(HAL_PIXEL_FORMAT_RGBA_8888);
 constexpr uint32_t kNativeUsageGpu = GRALLOC_USAGE_PRIVATE_0;
 // gralloc.default's private_handle_t: after the fd, magic and flags; for a
-// buffer in GPU memory its luma offset at 3, stride at 10, DRM format
-// modifier at 11 (low) and 12 (high) and CbCr offset at 13
+// buffer in GPU memory its (luma) offset at 3, HAL format at 7, stride in
+// pixels at 10, DRM format modifier at 11 (low) and 12 (high) and NV12's
+// CbCr offset at 13
 constexpr int kGrallocMagic = 0x3141592;
 constexpr int kGrallocGpuMemory = 0x2;
+
+constexpr char kSdrOutputProperty[] = "persist.waydroid.video_sdr_output";
+
+// Where 8-bit frames go when ACodec renders to a surface
+enum class SdrOutput {
+    // RGBA on a host whose NV12 is unreliable, else NV12, in GPU memory
+    kAuto,
+    kRgba,
+    kNv12,
+    // YV12 in system memory, which the host writes from a CPU copy
+    kSystem,
+};
+
+SdrOutput readSdrOutput() {
+    char value[PROPERTY_VALUE_MAX];
+    property_get(kSdrOutputProperty, value, "auto");
+    if (!strcmp(value, "rgba")) return SdrOutput::kRgba;
+    if (!strcmp(value, "nv12")) return SdrOutput::kNv12;
+    if (!strcmp(value, "system")) return SdrOutput::kSystem;
+    if (strcmp(value, "auto")) ALOGW("%s: unknown value %s, using auto", kSdrOutputProperty, value);
+    return SdrOutput::kAuto;
+}
+
+// The private_handle_t ints of HANDLE if it is a buffer in GPU memory, which
+// cannot be locked, else null.
+const int *gpuBufferInts(buffer_handle_t handle) {
+    const int *ints = handle->data + handle->numFds;
+    bool gpu = handle->numFds >= 1 && handle->numInts >= 14 && ints[0] == kGrallocMagic &&
+               (ints[1] & kGrallocGpuMemory);
+    return gpu ? ints : nullptr;
+}
 
 const CodecProfileLevel kAvcProfileLevels[] = {
     {OMX_VIDEO_AVCProfileConstrainedBaseline, OMX_VIDEO_AVCLevel52},
@@ -170,8 +210,13 @@ class WaydroidDecoder : public SoftVideoDecoderOMXComponent {
 
     int mFd = -1;
     bool mConnected = false;
-    // the host writes 8-bit frames into NV12 buffers in GPU memory
+    // the host writes 8-bit frames into NV12 buffers in GPU memory, and
+    // converts them for RGBA ones
     bool mGpuTargets = false;
+    bool mRgbaTargets = false;
+    // the host's GPU misreads some NV12 buffers
+    bool mNv12Unreliable = false;
+    SdrOutput mSdrOutput = SdrOutput::kAuto;
     uint8_t *mShm = nullptr;
     size_t mShmSize = 0;
     const gralloc_module_t *mGralloc = nullptr;
@@ -202,6 +247,8 @@ class WaydroidDecoder : public SoftVideoDecoderOMXComponent {
     bool copyToGraphicBuffer(const hwdec_reply &frame, buffer_handle_t handle);
     // The output color format FRAME needs.
     OMX_COLOR_FORMATTYPE formatFor(const hwdec_reply &frame) const;
+    // The format of 8-bit frames in a surface's buffers.
+    OMX_COLOR_FORMATTYPE nativeFormat() const;
     // Takes on FRAME's HDR10 metadata, telling ACodec when it changes.
     void updateHdrStaticInfo(const hwdec_reply &frame);
     // Returns false if the output port must reconfigure before the frame can
@@ -235,6 +282,11 @@ bool WaydroidDecoder::connectHost(uint32_t codec) {
         return false;
     }
     mGpuTargets = reply.flags & HWDEC_OPEN_GPU_TARGETS;
+    mRgbaTargets = reply.flags & HWDEC_OPEN_RGBA_TARGETS;
+    mNv12Unreliable = reply.flags & HWDEC_OPEN_NV12_UNRELIABLE;
+    mSdrOutput = readSdrOutput();
+    if (mSdrOutput == SdrOutput::kRgba && !mRgbaTargets)
+        ALOGW("%s=rgba, but the host cannot write RGBA buffers", kSdrOutputProperty);
     return true;
 }
 
@@ -368,13 +420,16 @@ uint32_t WaydroidDecoder::registerTarget(buffer_handle_t handle) {
     hwdec_reply reply;
 
     // a buffer in GPU memory cannot be locked; its layout is in the handle
-    const int *ints = handle->data + handle->numFds;
-    if (handle->numFds >= 1 && handle->numInts >= 14 && ints[0] == kGrallocMagic &&
-        (ints[1] & kGrallocGpuMemory)) {
-        layout.format = HWDEC_FORMAT_NV12_GPU;
+    if (const int *ints = gpuBufferInts(handle)) {
         layout.offset[0] = ints[3];
-        layout.offset[1] = ints[13];
-        layout.stride[0] = layout.stride[1] = ints[10];
+        if (ints[7] == HAL_PIXEL_FORMAT_RGBA_8888) {
+            layout.format = HWDEC_FORMAT_RGBA_GPU;
+            layout.stride[0] = ints[10] * 4;
+        } else {
+            layout.format = HWDEC_FORMAT_NV12_GPU;
+            layout.offset[1] = ints[13];
+            layout.stride[0] = layout.stride[1] = ints[10];
+        }
         layout.modifier_lo = ints[11];
         layout.modifier_hi = ints[12];
         if (!request(HWDEC_REQUEST_REGISTER, &layout, sizeof(layout), nullptr, 0,
@@ -480,8 +535,19 @@ bool WaydroidDecoder::copyToGraphicBuffer(const hwdec_reply &frame, buffer_handl
 
 OMX_COLOR_FORMATTYPE WaydroidDecoder::formatFor(const hwdec_reply &frame) const {
     bool deep = frame.format == HWDEC_FORMAT_I420_10 || frame.format == HWDEC_FORMAT_P010;
-    if (mNativeBuffers) return deep ? kNativeFormat10 : mGpuTargets ? kNativeFormatGpu : kNativeFormat;
+    if (mNativeBuffers) return deep ? kNativeFormat10 : nativeFormat();
     return deep ? OMX_COLOR_FormatYUV420Planar16 : OMX_COLOR_FormatYUV420Planar;
+}
+
+// The format the property asks for, or the next one the host can write.
+// RGBA falls back to NV12 only where NV12 is reliable.
+OMX_COLOR_FORMATTYPE WaydroidDecoder::nativeFormat() const {
+    bool rgba = mSdrOutput == SdrOutput::kRgba ||
+                (mSdrOutput == SdrOutput::kAuto && mNv12Unreliable);
+    if (mSdrOutput == SdrOutput::kSystem) return kNativeFormat;
+    if (rgba && mRgbaTargets) return kNativeFormatRgba;
+    if (mGpuTargets && !(rgba && mNv12Unreliable)) return kNativeFormatGpu;
+    return kNativeFormat;
 }
 
 void WaydroidDecoder::updateHdrStaticInfo(const hwdec_reply &frame) {
@@ -587,7 +653,8 @@ OMX_ERRORTYPE WaydroidDecoder::internalGetParameter(OMX_INDEXTYPE index, OMX_PTR
             if (!isValidOMXParam(param)) return OMX_ErrorBadParameter;
             if (param->nPortIndex != kOutputPortIndex) return OMX_ErrorBadPortIndex;
             // GPU memory, unless 10-bit frames need P010 buffers in system memory
-            param->nUsage = mOutputFormat == kNativeFormatGpu ? kNativeUsageGpu : kNativeUsage;
+            bool gpu = mOutputFormat == kNativeFormatGpu || mOutputFormat == kNativeFormatRgba;
+            param->nUsage = gpu ? kNativeUsageGpu : kNativeUsage;
             return OMX_ErrorNone;
         }
         case OMX_IndexParamVideoPortFormat: {
@@ -610,9 +677,7 @@ OMX_ERRORTYPE WaydroidDecoder::internalSetParameter(OMX_INDEXTYPE index, const O
             // ACodec passes the output color format to the surface as its HAL
             // pixel format.
             mNativeBuffers = param->enable;
-            mOutputFormat = !mNativeBuffers ? OMX_COLOR_FormatYUV420Planar
-                            : mGpuTargets  ? kNativeFormatGpu
-                                           : kNativeFormat;
+            mOutputFormat = mNativeBuffers ? nativeFormat() : OMX_COLOR_FormatYUV420Planar;
             updatePortDefinitions();
             clearTargets();
             return OMX_ErrorNone;
@@ -658,6 +723,16 @@ void WaydroidDecoder::onQueueFilled(OMX_U32 /* portIndex */) {
         if (mHaveHeldFrame) {
             reply = mHeldFrame;
             mHaveHeldFrame = false;
+            // The port reallocated its buffers for this frame: one the host
+            // wrote is in a buffer that is gone, and one in the shared memory
+            // cannot be copied into buffers in GPU memory.
+            auto handle = reinterpret_cast<buffer_handle_t>((*outQueue.begin())->mHeader->pBuffer);
+            if ((reply.flags & HWDEC_FRAME_IN_TARGET) ||
+                (mNativeBuffers && gpuBufferInts(handle))) {
+                ALOGW("dropped a %ux%u frame from before the output buffers changed",
+                      reply.width, reply.height);
+                continue;
+            }
         } else if (mPending || mDraining) {
             hwdec_output out = outputFor((*outQueue.begin())->mHeader);
             if (mSignalledError) return;

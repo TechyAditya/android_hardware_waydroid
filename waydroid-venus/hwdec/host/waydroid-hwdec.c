@@ -43,6 +43,8 @@ static atomic_uint sessions;
 static pthread_mutex_t device_lock = PTHREAD_MUTEX_INITIALIZER;
 /* --device, or AV_HWDEVICE_TYPE_NONE */
 static enum AVHWDeviceType device_type = AV_HWDEVICE_TYPE_NONE;
+/* --no-gpu-targets: frames always reach Android through shared memory */
+static bool gpu_targets = true;
 #define MAX_DEVICE_TYPES 32
 static struct {
    AVBufferRef *ref;
@@ -236,16 +238,18 @@ register_target(struct session *s, const struct hwdec_target *layout)
 
    bool ok = false;
    uint32_t w = layout->width, h = layout->height;
-   if (layout->format == HWDEC_FORMAT_NV12_GPU) {
+   if (layout->format == HWDEC_FORMAT_NV12_GPU || layout->format == HWDEC_FORMAT_RGBA_GPU) {
+      bool nv12 = layout->format == HWDEC_FORMAT_NV12_GPU;
       /* Vulkan checks the layout against the dma-buf when importing it */
-      if (!s->gpu || layout->id < 1 || layout->id > HWDEC_MAX_TARGETS || !w || !h || w % 2 ||
-          h % 2 || w > HWDEC_MAX_DIMENSION || h > HWDEC_MAX_DIMENSION ||
-          layout->stride[1] != layout->stride[0])
+      if (!s->gpu || layout->id < 1 || layout->id > HWDEC_MAX_TARGETS || !w || !h ||
+          w > HWDEC_MAX_DIMENSION || h > HWDEC_MAX_DIMENSION ||
+          (nv12 && (w % 2 || h % 2 || layout->stride[1] != layout->stride[0])))
          goto out;
       struct target *t = &s->targets[layout->id - 1];
       uint64_t modifier = (uint64_t)layout->modifier_hi << 32 | layout->modifier_lo;
       struct gpu_image *img =
-         gpu_import(s->gpu, fd, w, h, modifier, layout->offset, layout->stride[0]);
+         nv12 ? gpu_import(s->gpu, fd, w, h, modifier, layout->offset, layout->stride[0])
+              : gpu_import_rgba(s->gpu, fd, w, h, modifier, layout->offset[0], layout->stride[0]);
       if (!img)
          goto out;
       if (t->map)
@@ -457,7 +461,7 @@ create_context(struct session *s, const AVCodec *codec)
    /* frame threads only help the CPU fallback and add latency */
    s->ctx->thread_count = s->ctx->hw_device_ctx ? 1 : 0;
    if (avcodec_open2(s->ctx, codec, NULL) == 0) {
-      if (!s->gpu)
+      if (!s->gpu && gpu_targets)
          s->gpu = gpu_create(s->ctx->hw_device_ctx);
       return true;
    }
@@ -566,6 +570,24 @@ fill_hdr(struct hwdec_hdr *hdr, const AVFrame *frame)
    }
 }
 
+/* Android names every SDR video transfer SMPTE 170M, and since Android 13
+ * composition decodes that by its curve, which shows the shadows of video
+ * brighter and banded next to browsers and players.  Like Chromium on
+ * Android, tell it sRGB instead, so the values reach the display as they
+ * are. */
+static uint8_t
+display_transfer(enum AVColorTransferCharacteristic trc)
+{
+   switch (trc) {
+   case AVCOL_TRC_SMPTE2084:
+   case AVCOL_TRC_ARIB_STD_B67:
+   case AVCOL_TRC_LINEAR:
+      return trc;
+   default:
+      return AVCOL_TRC_IEC61966_2_1;
+   }
+}
+
 static struct hwdec_reply
 frame_reply(const struct session *s, const AVFrame *frame)
 {
@@ -576,7 +598,7 @@ frame_reply(const struct session *s, const AVFrame *frame)
       .width = frame->width,
       .height = frame->height,
       .primaries = frame->color_primaries,
-      .transfer = frame->color_trc,
+      .transfer = display_transfer(frame->color_trc),
       .matrix = frame->colorspace,
       .full_range = frame->color_range == AVCOL_RANGE_JPEG,
    };
@@ -600,14 +622,18 @@ reply_frame(struct session *s, const struct hwdec_output *out)
    const struct target *t = NULL;
    if (out->target >= 1 && out->target <= HWDEC_MAX_TARGETS)
       t = &s->targets[out->target - 1];
-   bool fits = t && w == out->width && h == out->height && w <= t->layout.width &&
-               h <= t->layout.height;
+   /* Android cannot copy a frame into a buffer in GPU memory, so one takes
+    * any frame it holds; see struct hwdec_output */
+   bool fits = t && w <= t->layout.width && h <= t->layout.height &&
+               (t->gpu || (w == out->width && h == out->height));
 
    /* a frame for a target in GPU memory never leaves it */
    if (fits && t->gpu && gpu_copy(s->gpu, frame, t->gpu, w, h)) {
       struct hwdec_reply reply = frame_reply(s, frame);
-      reply.format = HWDEC_FORMAT_NV12_GPU;
+      reply.format = t->layout.format;
       reply.flags |= HWDEC_FRAME_IN_TARGET;
+      if (reply.format == HWDEC_FORMAT_RGBA_GPU)
+         reply.full_range = 1;
       av_frame_free(&frame);
       return send_reply(s, &reply);
    }
@@ -813,7 +839,9 @@ handle_request(struct session *s, const struct hwdec_request *req)
       }
       struct hwdec_reply reply = {
          .type = HWDEC_REPLY_OK,
-         .flags = s->gpu ? HWDEC_OPEN_GPU_TARGETS : 0,
+         .flags = (s->gpu ? HWDEC_OPEN_GPU_TARGETS : 0) |
+                  (gpu_can_convert(s->gpu) ? HWDEC_OPEN_RGBA_TARGETS : 0) |
+                  (gpu_nv12_unreliable(s->gpu) ? HWDEC_OPEN_NV12_UNRELIABLE : 0),
       };
       return send_reply(s, &reply);
    }
@@ -958,6 +986,7 @@ main(int argc, char **argv)
       { "allowed-uid", required_argument, NULL, 'u' },
       { "max-decoders", required_argument, NULL, 'n' },
       { "device", required_argument, NULL, 'd' },
+      { "no-gpu-targets", no_argument, NULL, 'g' },
       { 0 },
    };
    const char *path = NULL;
@@ -980,6 +1009,9 @@ main(int argc, char **argv)
             return 2;
          }
          break;
+      case 'g':
+         gpu_targets = false;
+         break;
       default:
          return 2;
       }
@@ -988,7 +1020,7 @@ main(int argc, char **argv)
    if (!path || strlen(path) >= sizeof(addr.sun_path)) {
       fprintf(stderr,
               "usage: %s --socket-path PATH [--allowed-uid UID] [--max-decoders N] "
-              "[--device cuda|vaapi|vulkan]\n",
+              "[--device cuda|vaapi|vulkan] [--no-gpu-targets]\n",
               argv[0]);
       return 2;
    }

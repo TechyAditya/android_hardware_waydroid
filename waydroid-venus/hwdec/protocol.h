@@ -7,16 +7,17 @@
  * The host writes a frame into a target buffer the client registered, which
  * is how frames go straight into Android's gralloc buffers, or else into a
  * shared memfd that it attaches (SCM_RIGHTS) to the reply that first uses
- * it.  8-bit frames are I420, or NV12 in targets in GPU memory, which the
- * host fills by a copy on the GPU; 10-bit frames are P010 in targets and
- * 16-bit I420 in the shared memory.
+ * it.  8-bit frames are I420, or in targets in GPU memory NV12, which the
+ * host fills by a copy on the GPU, or RGBA, which it converts them to on the
+ * GPU; 10-bit frames are P010 in targets and 16-bit I420 in the shared
+ * memory.
  */
 #ifndef WAYDROID_HWDEC_PROTOCOL_H
 #define WAYDROID_HWDEC_PROTOCOL_H
 
 #include <stdint.h>
 
-#define HWDEC_VERSION 4
+#define HWDEC_VERSION 5
 #define HWDEC_SOCKET_NAME "hwdec.sock"
 #define HWDEC_MAX_PACKET_SIZE (64u << 20)
 #define HWDEC_MAX_DIMENSION 8192u
@@ -31,9 +32,9 @@ enum hwdec_codec {
 };
 
 enum hwdec_request_type {
-   /* payload: struct hwdec_open; reply HWDEC_REPLY_OK, with
-    * HWDEC_OPEN_GPU_TARGETS set if the host writes NV12 targets in GPU
-    * memory, or HWDEC_REPLY_ERROR */
+   /* payload: struct hwdec_open; reply HWDEC_REPLY_OK, with the
+    * HWDEC_OPEN_*_TARGETS flags of the targets in GPU memory the host
+    * writes, or HWDEC_REPLY_ERROR */
    HWDEC_REQUEST_OPEN = 1,
    /* payload: struct hwdec_packet, then the bitstream; reply a frame or
     * HWDEC_REPLY_NO_FRAME */
@@ -47,8 +48,8 @@ enum hwdec_request_type {
    HWDEC_REQUEST_DRAIN = 4,
    /* no payload; drops every queued packet and frame; reply HWDEC_REPLY_OK */
    HWDEC_REQUEST_FLUSH = 5,
-   /* payload: struct hwdec_target, with the buffer's memfd, or for
-    * HWDEC_FORMAT_NV12_GPU its dma-buf, attached; reply HWDEC_REPLY_OK, or
+   /* payload: struct hwdec_target, with the buffer's memfd, or for a format
+    * in GPU memory its dma-buf, attached; reply HWDEC_REPLY_OK, or
     * HWDEC_REPLY_ERROR if the host cannot write to it */
    HWDEC_REQUEST_REGISTER = 6,
    /* no payload; forgets every target; reply HWDEC_REPLY_OK */
@@ -75,10 +76,20 @@ enum hwdec_format {
    /* 8-bit Y plane and interleaved CbCr plane in a dma-buf in GPU memory,
     * laid out by a DRM format modifier; targets only */
    HWDEC_FORMAT_NV12_GPU = 4,
+   /* 8-bit R, G, B and A bytes (DRM_FORMAT_ABGR8888) in a dma-buf in GPU
+    * memory, laid out by a DRM format modifier; targets only.  The host
+    * converts frames to full-range RGB by their matrix, so a frame in one
+    * comes back with full_range set. */
+   HWDEC_FORMAT_RGBA_GPU = 5,
 };
 
-/* in the reply to HWDEC_REQUEST_OPEN */
+/* in the reply to HWDEC_REQUEST_OPEN: the host writes HWDEC_FORMAT_NV12_GPU
+ * or HWDEC_FORMAT_RGBA_GPU targets */
 #define HWDEC_OPEN_GPU_TARGETS (1u << 0)
+#define HWDEC_OPEN_RGBA_TARGETS (1u << 1)
+/* the host GPU (NVIDIA) misreads some NV12 dma-bufs that another device
+ * imports, so frames are best written as RGBA */
+#define HWDEC_OPEN_NV12_UNRELIABLE (1u << 2)
 
 /* the packet is codec configuration (csd), not a frame */
 #define HWDEC_PACKET_CONFIG (1u << 0)
@@ -96,9 +107,12 @@ struct hwdec_open {
    uint32_t codec;
 };
 
-/* Where a frame the request returns goes.  The host uses the target only
- * for a frame of exactly this size, so a frame that needs differently sized
- * buffers stays in the shared memory until the client has them. */
+/* Where a frame the request returns goes.  The host uses a target in system
+ * memory only for a frame of exactly this size, so a frame that needs
+ * differently sized buffers stays in the shared memory until the client has
+ * them.  A target in GPU memory, which the client cannot copy into, takes
+ * any frame that fits in it, top left: with adaptive playback the buffers
+ * are allocated for the largest size the stream switches to. */
 struct hwdec_output {
    /* a registered target, or 0 */
    uint32_t target;
@@ -116,7 +130,7 @@ struct hwdec_packet {
  * (for P010 and NV12, Cr follows Cb in the same plane).  The memfd must be
  * sealed against shrinking.  The host writes only frames of the buffer's
  * format: I420, P010 or, into a dma-buf whose layout the modifier names,
- * NV12. */
+ * 8-bit frames as NV12 or RGBA.  RGBA uses only offset[0] and stride[0]. */
 struct hwdec_target {
    uint32_t id; /* 1 to HWDEC_MAX_TARGETS */
    uint32_t format;
@@ -124,7 +138,7 @@ struct hwdec_target {
    uint32_t height;
    uint32_t offset[3];
    uint32_t stride[3];
-   /* DRM format modifier of an HWDEC_FORMAT_NV12_GPU buffer */
+   /* DRM format modifier of a buffer in GPU memory */
    uint32_t modifier_lo;
    uint32_t modifier_hi;
 };
@@ -158,7 +172,8 @@ struct hwdec_reply {
    uint32_t stride[3];
    /* nonzero when a new shared memory fd is attached to this reply */
    uint64_t shm_size;
-   /* ISO/IEC 23091-4 values; 2 means unspecified */
+   /* ISO/IEC 23091-4 values; 2 means unspecified.  SDR transfers come back
+    * as sRGB (13), which Android shows as is. */
    uint8_t primaries;
    uint8_t transfer;
    uint8_t matrix;
