@@ -1,0 +1,430 @@
+diff --git a/modules/gralloc/gralloc.cpp b/modules/gralloc/gralloc.cpp
+index 87bda97..5efdd6e 100644
+--- a/modules/gralloc/gralloc.cpp
++++ b/modules/gralloc/gralloc.cpp
+@@ -22,10 +22,14 @@
+ #include <string.h>
+ #include <sys/ioctl.h>
+ #include <sys/mman.h>
++#include <sys/socket.h>
+ #include <sys/stat.h>
+ #include <sys/types.h>
++#include <sys/un.h>
+ #include <unistd.h>
+ 
++#include <numeric>
++
+ #include <cutils/ashmem.h>
+ #include <cutils/atomic.h>
+ #include <log/log.h>
+@@ -35,6 +39,7 @@
+ 
+ #include "gralloc_priv.h"
+ #include "gr.h"
++#include "protocol.h"
+ 
+ /*****************************************************************************/
+ 
+@@ -62,6 +67,11 @@ extern int gralloc_lock(gralloc_module_t const* module,
+ extern int gralloc_unlock(gralloc_module_t const* module, 
+         buffer_handle_t handle);
+ 
++extern int gralloc_lock_ycbcr(gralloc_module_t const* module,
++        buffer_handle_t handle, int usage,
++        int l, int t, int w, int h,
++        struct android_ycbcr* ycbcr);
++
+ extern int gralloc_register_buffer(gralloc_module_t const* module,
+         buffer_handle_t handle);
+ 
+@@ -89,6 +99,7 @@ struct private_module_t HAL_MODULE_INFO_SYM = {
+         .unregisterBuffer = gralloc_unregister_buffer,
+         .lock = gralloc_lock,
+         .unlock = gralloc_unlock,
++        .lock_ycbcr = gralloc_lock_ycbcr,
+     },
+     .framebuffer = 0,
+     .flags = 0,
+@@ -185,6 +196,9 @@ static int gralloc_alloc_buffer(alloc_device_t* dev,
+         err = mapBuffer(module, hnd);
+         if (err == 0) {
+             *pHandle = hnd;
++        } else {
++            close(fd);
++            delete hnd;
+         }
+     }
+     
+@@ -195,56 +209,224 @@ static int gralloc_alloc_buffer(alloc_device_t* dev,
+ 
+ /*****************************************************************************/
+ 
+-inline size_t align(size_t value, size_t alignment)
++// Buffers that ask for GRALLOC_USAGE_PRIVATE_0 live in GPU memory, allocated
++// by waydroid-alloc on the host (see alloc/protocol.h).  Android renders into
++// them and the compositor reads them without the frames crossing PCIe.
++static const char kAllocSocket[] = "/data/venus/" ALLOC_SOCKET_NAME;
++static const uint32_t kDrmFormatAbgr8888 = 0x34324241; // 'AB24'
++static const uint32_t kDrmFormatXbgr8888 = 0x34324258; // 'XB24'
++static const uint32_t kDrmFormatNv12 = 0x3231564e; // 'NV12'
++
++static int gralloc_alloc_gpu(int width, int height, int format,
++        buffer_handle_t* pHandle, int* pStride)
++{
++    int s = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
++    if (s < 0)
++        return -errno;
++    sockaddr_un addr = {};
++    addr.sun_family = AF_UNIX;
++    strcpy(addr.sun_path, kAllocSocket);
++    timeval tv = {1, 0};
++    setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
++    setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
++    if (connect(s, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) < 0) {
++        close(s);
++        return -ENODEV;
++    }
++
++    // flexible YCbCr 4:2:0 in GPU memory is NV12, for video frames the host
++    // decoder writes
++    const bool nv12 = format == HAL_PIXEL_FORMAT_YCbCr_420_888;
++    alloc_request req = {ALLOC_VERSION, uint32_t(width), uint32_t(height),
++            nv12 ? kDrmFormatNv12 :
++            format == HAL_PIXEL_FORMAT_RGBX_8888 ? kDrmFormatXbgr8888 : kDrmFormatAbgr8888};
++    alloc_reply reply = {};
++    union {
++        char buf[CMSG_SPACE(sizeof(int))];
++        cmsghdr align;
++    } control;
++    iovec iov = {&reply, sizeof(reply)};
++    msghdr msg = {};
++    msg.msg_iov = &iov;
++    msg.msg_iovlen = 1;
++    msg.msg_control = control.buf;
++    msg.msg_controllen = sizeof(control.buf);
++    int fd = -1;
++    ssize_t n = -1;
++    if (send(s, &req, sizeof(req), MSG_NOSIGNAL) == sizeof(req))
++        n = recvmsg(s, &msg, MSG_WAITALL | MSG_CMSG_CLOEXEC);
++    for (cmsghdr* c = CMSG_FIRSTHDR(&msg); n > 0 && c; c = CMSG_NXTHDR(&msg, c)) {
++        if (c->cmsg_level == SOL_SOCKET && c->cmsg_type == SCM_RIGHTS &&
++                c->cmsg_len == CMSG_LEN(sizeof(int)))
++            memcpy(&fd, CMSG_DATA(c), sizeof(int));
++    }
++    close(s);
++
++    const uint64_t bpp = nv12 ? 1 : 4;
++    const uint64_t rowBytes = uint64_t(width) * bpp;
++    if (n != sizeof(reply) || reply.status != 0 || fd < 0 || reply.stride % bpp ||
++            reply.stride < rowBytes || reply.size > INT_MAX ||
++            reply.offset + uint64_t(reply.stride) * height > reply.size ||
++            (nv12 && reply.offset1 + uint64_t(reply.stride) * ((height + 1) / 2) > reply.size)) {
++        if (fd >= 0)
++            close(fd);
++        ALOGW("waydroid-alloc refused %dx%d (status %d)", width, height, reply.status);
++        return -ENOMEM;
++    }
++
++    private_handle_t* hnd = new private_handle_t(fd, int(reply.size),
++            private_handle_t::PRIV_FLAGS_GPU_MEMORY);
++    hnd->offset = int(reply.offset);
++    hnd->format = format;
++    hnd->width = width;
++    hnd->height = height;
++    hnd->stride = int(reply.stride / bpp);
++    hnd->offset1 = nv12 ? int(reply.offset1) : 0;
++    hnd->modifier_lo = uint32_t(reply.modifier);
++    hnd->modifier_hi = uint32_t(reply.modifier >> 32);
++    *pHandle = hnd;
++    *pStride = hnd->stride;
++    return 0;
++}
++
++inline uint64_t align(uint64_t value, uint64_t alignment)
+ {
+     return ((value + alignment - 1) / alignment) * alignment;
+ }
+ 
++// HAL_PIXEL_FORMAT_R_8 from graphics-base-v1.2
++static const int kFormatR8 = 0x38;
++
+ static int gralloc_alloc(alloc_device_t* dev,
+         int width, int height, int format, int usage,
+         buffer_handle_t* pHandle, int* pStride)
+ {
+-    if (!pHandle || !pStride)
++    if (!pHandle || !pStride || width <= 0 || height <= 0)
+         return -EINVAL;
+ 
+-    int bytesPerPixel = 0;
+-    switch (format) {
+-        case HAL_PIXEL_FORMAT_RGBA_FP16:
+-            bytesPerPixel = 8;
+-            break;
+-        case HAL_PIXEL_FORMAT_RGBA_8888:
+-        case HAL_PIXEL_FORMAT_RGBX_8888:
+-        case HAL_PIXEL_FORMAT_BGRA_8888:
+-            bytesPerPixel = 4;
+-            break;
+-        case HAL_PIXEL_FORMAT_RGB_888:
+-            bytesPerPixel = 3;
+-            break;
+-        case HAL_PIXEL_FORMAT_RGB_565:
+-        case HAL_PIXEL_FORMAT_RAW16:
+-            bytesPerPixel = 2;
+-            break;
+-        default:
+-            return -EINVAL;
+-    }
++    // ashmem cannot keep protected content from the CPU.
++    if (usage & GRALLOC_USAGE_PROTECTED)
++        return -EINVAL;
+ 
+-    const size_t tileWidth = 2;
+-    const size_t tileHeight = 2;
++    if (format == HAL_PIXEL_FORMAT_IMPLEMENTATION_DEFINED) {
++        format = (usage & GRALLOC_USAGE_HW_CAMERA_WRITE)
++                ? HAL_PIXEL_FORMAT_YCbCr_420_888
++                : HAL_PIXEL_FORMAT_RGBA_8888;
++    }
+ 
+-    size_t stride = align(width, tileWidth);
+-    size_t size = align(height, tileHeight) * stride * bytesPerPixel + 4;
++    // GPU-only buffers, such as app windows, displays and hardware bitmaps,
++    // which the GPU uploads and then samples every frame, go in GPU memory.
++    // Anything the CPU, the framebuffer target's copy, an encoder or a camera
++    // reads stays in system memory.
++    const int gpuMemoryUsage = GRALLOC_USAGE_PRIVATE_0 | GRALLOC_USAGE_HW_RENDER |
++            GRALLOC_USAGE_HW_TEXTURE;
++    const int systemMemoryUsage = GRALLOC_USAGE_SW_READ_MASK | GRALLOC_USAGE_SW_WRITE_MASK |
++            GRALLOC_USAGE_HW_FB | GRALLOC_USAGE_HW_VIDEO_ENCODER | GRALLOC_USAGE_HW_CAMERA_MASK;
++    // Video frames are flexible YCbCr 4:2:0 that only the host decoder
++    // writes, which asks with GRALLOC_USAGE_PRIVATE_0 alone.
++    const bool gpuFormat = format == HAL_PIXEL_FORMAT_RGBA_8888 ||
++            format == HAL_PIXEL_FORMAT_RGBX_8888 ||
++            (format == HAL_PIXEL_FORMAT_YCbCr_420_888 && (usage & GRALLOC_USAGE_PRIVATE_0));
++    if ((usage & gpuMemoryUsage) && !(usage & systemMemoryUsage) && gpuFormat) {
++        if (gralloc_alloc_gpu(width, height, format, pHandle, pStride) == 0)
++            return 0;
++        // Without the host allocator, a buffer in system memory still works.
++    }
+ 
+-    int err;
+-    if (usage & GRALLOC_USAGE_HW_FB) {
+-        err = gralloc_alloc_framebuffer(dev, size, format, usage, pHandle);
++    uint64_t tileHeight = 2;
++    uint64_t stride, size;
++    if (format == HAL_PIXEL_FORMAT_YV12 ||
++            format == HAL_PIXEL_FORMAT_YCbCr_420_888) {
++        // YV12 as Android defines it, which also serves as the flexible
++        // YCbCr 4:2:0 layout through lock_ycbcr.  NVIDIA misreads planes
++        // whose rows are not 128-byte aligned or that do not start on 256
++        // bytes, so the luma stride is aligned to 256 bytes and the plane
++        // heights to 16 rows.  lock_ycbcr reports the padded layout.
++        tileHeight = 16;
++        stride = align(width, 256);
++        const uint64_t cstride = align(stride / 2, 16);
++        size = align(height, tileHeight) * (stride + cstride);
++        format = HAL_PIXEL_FORMAT_YV12;
++    } else if (format == HAL_PIXEL_FORMAT_YCBCR_P010) {
++        // 10-bit 4:2:0: a plane of 16-bit Y samples, then interleaved Cb Cr,
++        // aligned like YV12.  The stride is in pixels.
++        tileHeight = 16;
++        stride = align(width, 128);
++        size = align(height, tileHeight) * stride * 2 * 3 / 2;
+     } else {
+-        err = gralloc_alloc_buffer(dev, size, usage, pHandle);
++        // Venus imports gralloc buffers as images through Mesa's fallback
++        // gralloc, which knows only the 565, 8888, 1010102, FP16 and YUV
++        // formats.  The formats below are for the CPU, the camera or, for
++        // BLOB, GPU data buffers only.
++        const int gpuImageUsage = GRALLOC_USAGE_HW_TEXTURE |
++                GRALLOC_USAGE_HW_RENDER | GRALLOC_USAGE_HW_COMPOSER |
++                GRALLOC_USAGE_HW_FB;
++        switch (format) {
++            case HAL_PIXEL_FORMAT_RGB_888:
++            case HAL_PIXEL_FORMAT_RAW16:
++            case HAL_PIXEL_FORMAT_Y16:
++            case HAL_PIXEL_FORMAT_Y8:
++            case kFormatR8:
++            case HAL_PIXEL_FORMAT_BLOB:
++                if (usage & gpuImageUsage)
++                    return -EINVAL;
++                break;
++        }
++
++        int bytesPerPixel = 0;
++        switch (format) {
++            case HAL_PIXEL_FORMAT_RGBA_FP16:
++                bytesPerPixel = 8;
++                break;
++            case HAL_PIXEL_FORMAT_RGBA_8888:
++            case HAL_PIXEL_FORMAT_RGBX_8888:
++            case HAL_PIXEL_FORMAT_BGRA_8888:
++            case HAL_PIXEL_FORMAT_RGBA_1010102:
++                bytesPerPixel = 4;
++                break;
++            case HAL_PIXEL_FORMAT_RGB_888:
++                bytesPerPixel = 3;
++                break;
++            case HAL_PIXEL_FORMAT_RGB_565:
++            case HAL_PIXEL_FORMAT_RAW16:
++            case HAL_PIXEL_FORMAT_Y16:
++                bytesPerPixel = 2;
++                break;
++            case HAL_PIXEL_FORMAT_BLOB:
++            case HAL_PIXEL_FORMAT_Y8:
++            case kFormatR8:
++                bytesPerPixel = 1;
++                break;
++            default:
++                ALOGW("unsupported format 0x%x (usage 0x%x)", format, usage);
++                return -EINVAL;
++        }
++
++        // NVIDIA's Vulkan driver silently pads linear image rows to 128
++        // bytes, so buffers shared with it must use that row alignment.
++        const uint64_t tileWidth = 128 / std::gcd(uint64_t(128), uint64_t(bytesPerPixel));
++        stride = align(width, tileWidth);
++        size = align(height, tileHeight) * stride * bytesPerPixel + 4;
+     }
+ 
++    // Waydroid has no framebuffer device, so framebuffer usage gets a
++    // regular buffer.
++    // ashmem sizes are ints, and 32-bit processes cannot map more anyway
++    if (size > INT_MAX - PAGE_SIZE)
++        return -ENOMEM;
++
++    int err = gralloc_alloc_buffer(dev, size, usage, pHandle);
+     if (err < 0) {
+         return err;
+     }
+ 
++    private_handle_t* hnd = const_cast<private_handle_t*>(
++            reinterpret_cast<const private_handle_t*>(*pHandle));
++    hnd->format = format;
++    hnd->width = width;
++    hnd->height = align(height, tileHeight);
++    hnd->stride = stride;
++
+     *pStride = stride;
+     return 0;
+ }
+diff --git a/modules/gralloc/gralloc_priv.h b/modules/gralloc/gralloc_priv.h
+index 2cd1007..7ba5a20 100644
+--- a/modules/gralloc/gralloc_priv.h
++++ b/modules/gralloc/gralloc_priv.h
+@@ -63,7 +63,9 @@ struct private_handle_t {
+ #endif
+ 
+     enum {
+-        PRIV_FLAGS_FRAMEBUFFER = 0x00000001
++        PRIV_FLAGS_FRAMEBUFFER = 0x00000001,
++        // fd is a dma-buf in GPU memory, laid out by the modifier; never mapped
++        PRIV_FLAGS_GPU_MEMORY  = 0x00000002,
+     };
+ 
+     // file-descriptors
+@@ -77,6 +79,17 @@ struct private_handle_t {
+     // FIXME: the attributes below should be out-of-line
+     uint64_t base __attribute__((aligned(8)));
+     int     pid;
++    // layout, for lock_ycbcr
++    int     format;
++    int     width;
++    int     height;
++    int     stride;
++    // DRM format modifier of a buffer in GPU memory
++    uint32_t modifier_lo;
++    uint32_t modifier_hi;
++    // offset of the CbCr plane of an NV12 buffer in GPU memory, whose stride
++    // is the luma stride; fills what was padding, so numInts is unchanged
++    int     offset1;
+ 
+ #ifdef __cplusplus
+     static inline int sNumInts() {
+@@ -87,7 +100,8 @@ struct private_handle_t {
+ 
+     private_handle_t(int fd, int size, int flags) :
+         fd(fd), magic(sMagic), flags(flags), size(size), offset(0),
+-        base(0), pid(getpid())
++        base(0), pid(getpid()), format(0), width(0), height(0), stride(0),
++        modifier_lo(0), modifier_hi(0), offset1(0)
+     {
+         version = sizeof(native_handle);
+         numInts = sNumInts();
+diff --git a/modules/gralloc/mapper.cpp b/modules/gralloc/mapper.cpp
+index ee3e40e..718848c 100644
+--- a/modules/gralloc/mapper.cpp
++++ b/modules/gralloc/mapper.cpp
+@@ -39,6 +39,12 @@ static int gralloc_map(gralloc_module_t const* /*module*/,
+         void** vaddr)
+ {
+     private_handle_t* hnd = (private_handle_t*)handle;
++    // GPU memory isn't mappable; only the GPU and the compositor read it.
++    if (hnd->flags & private_handle_t::PRIV_FLAGS_GPU_MEMORY) {
++        hnd->base = 0;
++        *vaddr = nullptr;
++        return 0;
++    }
+     if (!(hnd->flags & private_handle_t::PRIV_FLAGS_FRAMEBUFFER)) {
+         size_t size = hnd->size;
+         void* mappedAddress = mmap(0, size,
+@@ -171,10 +177,57 @@ int gralloc_lock(gralloc_module_t const* /*module*/,
+         return -EINVAL;
+ 
+     private_handle_t* hnd = (private_handle_t*)handle;
++    if (hnd->flags & private_handle_t::PRIV_FLAGS_GPU_MEMORY)
++        return -EINVAL;
+     *vaddr = (void*)hnd->base;
+     return 0;
+ }
+ 
++int gralloc_lock_ycbcr(gralloc_module_t const* /*module*/,
++        buffer_handle_t handle, int usage,
++        int /*l*/, int /*t*/, int /*w*/, int /*h*/,
++        struct android_ycbcr* ycbcr)
++{
++    if (private_handle_t::validate(handle) < 0)
++        return -EINVAL;
++
++    private_handle_t* hnd = (private_handle_t*)handle;
++    if (hnd->format != HAL_PIXEL_FORMAT_YV12 && hnd->format != HAL_PIXEL_FORMAT_YCBCR_P010)
++        return -EINVAL;
++
++    // Without CPU usage, callers such as Mesa query the plane layout and
++    // expect the pointers to be offsets from NULL.
++    const bool cpu = usage & (GRALLOC_USAGE_SW_READ_MASK | GRALLOC_USAGE_SW_WRITE_MASK);
++    if (hnd->format == HAL_PIXEL_FORMAT_YCBCR_P010) {
++        const size_t stride = size_t(hnd->stride) * 2;
++        const uintptr_t y = cpu ? uintptr_t(hnd->base) : 0;
++        const uintptr_t cb = y + stride * hnd->height;
++
++        memset(ycbcr, 0, sizeof(*ycbcr));
++        ycbcr->y = reinterpret_cast<void*>(y);
++        ycbcr->cb = reinterpret_cast<void*>(cb);
++        ycbcr->cr = reinterpret_cast<void*>(cb + 2);
++        ycbcr->ystride = stride;
++        ycbcr->cstride = stride;
++        ycbcr->chroma_step = 4;
++        return 0;
++    }
++    const size_t ystride = hnd->stride;
++    const size_t cstride = (ystride / 2 + 15) & ~size_t(15);
++    const uintptr_t y = cpu ? uintptr_t(hnd->base) : 0;
++    const uintptr_t cr = y + ystride * hnd->height;
++    const uintptr_t cb = cr + cstride * (hnd->height / 2);
++
++    memset(ycbcr, 0, sizeof(*ycbcr));
++    ycbcr->y = reinterpret_cast<void*>(y);
++    ycbcr->cb = reinterpret_cast<void*>(cb);
++    ycbcr->cr = reinterpret_cast<void*>(cr);
++    ycbcr->ystride = ystride;
++    ycbcr->cstride = cstride;
++    ycbcr->chroma_step = 1;
++    return 0;
++}
++
+ int gralloc_unlock(gralloc_module_t const* /*module*/,
+         buffer_handle_t handle)
+ {

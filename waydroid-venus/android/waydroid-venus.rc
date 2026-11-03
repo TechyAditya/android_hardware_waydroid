@@ -1,0 +1,2 @@
+on property:init.svc.surfaceflinger=running
+    exec_background - root root -- /system/bin/sh /vendor/bin/waydroid-venus-recover.sh

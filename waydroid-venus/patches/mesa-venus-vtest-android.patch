@@ -1,0 +1,1003 @@
+diff --git a/src/util/u_gralloc/u_gralloc_fallback.c b/src/util/u_gralloc/u_gralloc_fallback.c
+index 44fb32d..82fbbf7 100644
+--- a/src/util/u_gralloc/u_gralloc_fallback.c
++++ b/src/util/u_gralloc/u_gralloc_fallback.c
+@@ -109,6 +109,23 @@ fallback_gralloc_get_buffer_info(struct u_gralloc *gralloc,
+    if (hnd->handle->numFds == 0)
+       return -EINVAL;
+ 
++   /* Waydroid's gralloc.default puts video frames the host decoder writes in
++    * GPU memory as NV12, which the CPU cannot lock: the luma offset at int 3,
++    * the stride at 10, the modifier at 11 (low) and 12 (high) and the CbCr
++    * offset at 13. */
++   const int *wd = hnd->handle->data + hnd->handle->numFds;
++   if (hnd->hal_format == HAL_PIXEL_FORMAT_YCbCr_420_888 && hnd->handle->numInts >= 14 &&
++       wd[0] == 0x3141592 && (wd[1] & 0x2)) {
++      out->drm_fourcc = DRM_FORMAT_NV12;
++      out->modifier = (uint64_t)(uint32_t)wd[12] << 32 | (uint32_t)wd[11];
++      out->num_planes = 2;
++      out->fds[0] = out->fds[1] = hnd->handle->data[0];
++      out->offsets[0] = wd[3];
++      out->offsets[1] = wd[13];
++      out->strides[0] = out->strides[1] = wd[10];
++      return 0;
++   }
++
+    if (is_hal_format_yuv(hnd->hal_format)) {
+       int ret = fallback_gralloc_get_yuv_info(gralloc, hnd, out);
+       /*
+@@ -147,6 +164,15 @@ fallback_gralloc_get_buffer_info(struct u_gralloc *gralloc,
+    out->fds[0] = hnd->handle->data[0];
+    out->strides[0] = stride;
+ 
++   /* Waydroid's gralloc.default: the ints after the fd start with its magic
++    * and flags.  A buffer in GPU memory also has its offset at 3 and its
++    * DRM format modifier at 11 (low) and 12 (high). */
++   const int *ints = hnd->handle->data + hnd->handle->numFds;
++   if (hnd->handle->numInts >= 13 && ints[0] == 0x3141592 && (ints[1] & 0x2)) {
++      out->modifier = (uint64_t)(uint32_t)ints[12] << 32 | (uint32_t)ints[11];
++      out->offsets[0] = ints[3];
++   }
++
+ #ifdef HAS_FREEDRENO
+    uint32_t gmsm = ('g' << 24) | ('m' << 16) | ('s' << 8) | 'm';
+    if (hnd->handle->numInts >= 2 && hnd->handle->data[hnd->handle->numFds] == gmsm) {
+diff --git a/src/util/u_gralloc/u_gralloc_internal.c b/src/util/u_gralloc/u_gralloc_internal.c
+index c645202..64962f2 100644
+--- a/src/util/u_gralloc/u_gralloc_internal.c
++++ b/src/util/u_gralloc/u_gralloc_internal.c
+@@ -37,6 +37,7 @@ static const struct droid_yuv_format droid_yuv_formats[] = {
+    {HAL_PIXEL_FORMAT_YCbCr_420_888, YCbCr, 1, DRM_FORMAT_YUV420},
+    {HAL_PIXEL_FORMAT_YCbCr_420_888, YCrCb, 1, DRM_FORMAT_YVU420},
+    {HAL_PIXEL_FORMAT_YV12, YCrCb, 1, DRM_FORMAT_YVU420},
++   {HAL_PIXEL_FORMAT_YCBCR_P010, YCbCr, 4, DRM_FORMAT_P010},
+    /* HACK: See droid_create_image_from_prime_fds() and
+     * https://issuetracker.google.com/32077885. */
+    {HAL_PIXEL_FORMAT_IMPLEMENTATION_DEFINED, YCbCr, 2, DRM_FORMAT_NV12},
+@@ -154,7 +155,8 @@ bufferinfo_from_ycbcr(const struct android_ycbcr *ycbcr,
+ 
+    out->drm_fourcc = drm_fourcc;
+ 
+-   out->num_planes = ycbcr->chroma_step == 2 ? 2 : 3;
++   /* interleaved chroma, 8-bit (NV12) or 16-bit (P010), is one plane */
++   out->num_planes = ycbcr->chroma_step == 1 ? 3 : 2;
+    /* When lock_ycbcr's usage argument contains no SW_READ/WRITE flags
+     * it will return the .y/.cb/.cr pointers based on a NULL pointer,
+     * so they can be interpreted as offsets. */
+diff --git a/src/virtio/vtest/vtest_protocol.h b/src/virtio/vtest/vtest_protocol.h
+index 1bd515c..8b326da 100644
+--- a/src/virtio/vtest/vtest_protocol.h
++++ b/src/virtio/vtest/vtest_protocol.h
+@@ -27,7 +27,7 @@
+ 
+ #define VTEST_DEFAULT_SOCKET_NAME "/tmp/.virgl_test"
+ 
+-#define VTEST_PROTOCOL_VERSION 4
++#define VTEST_PROTOCOL_VERSION 5
+ 
+ /* 32-bit length field */
+ /* 32-bit cmd field */
+@@ -94,6 +94,12 @@
+ #define VCMD_DRM_SYNC_TRANSFER 37
+ #define VCMD_RESOURCE_EXPORT_FD 38
+ 
++/* since protocol version 5 */
++#define VCMD_RESOURCE_IMPORT_FD 39
++
++/* export a sync_file fd for a pending venus sync point; see VCMD_PARAM_HAS_VENUS_SYNC_FD */
++#define VCMD_SYNC_EXPORT_SYNC_FILE 40
++
+ #define VCMD_RES_CREATE_SIZE 10
+ #define VCMD_RES_CREATE_RES_HANDLE 0 /* must be 0 since protocol version 3 */
+ #define VCMD_RES_CREATE_TARGET 1
+@@ -163,6 +169,8 @@
+ enum vcmd_param  {
+    VCMD_PARAM_MAX_TIMELINE_COUNT = 1,
+    VCMD_PARAM_HAS_TIMELINE_SYNCOBJ = 2,
++   /* server supports VCMD_SYNC_EXPORT_SYNC_FILE for venus sync points */
++   VCMD_PARAM_HAS_VENUS_SYNC_FD = 3,
+ };
+ #define VCMD_GET_PARAM_SIZE 1
+ #define VCMD_GET_PARAM_PARAM 0
+@@ -225,6 +233,17 @@ enum vcmd_sync_wait_flag {
+ #define VCMD_SYNC_WAIT_VALUE_HI(n) (2 + 3 * (n) + 2)
+ /* resp poll'able fd */
+ 
++enum vcmd_sync_export_sync_file_status {
++   VCMD_SYNC_EXPORT_SYNC_FILE_OK = 0,
++   VCMD_SYNC_EXPORT_SYNC_FILE_SIGNALED = 1,
++   VCMD_SYNC_EXPORT_SYNC_FILE_ERROR = 2,
++};
++#define VCMD_SYNC_EXPORT_SYNC_FILE_SIZE 3
++#define VCMD_SYNC_EXPORT_SYNC_FILE_ID 0
++#define VCMD_SYNC_EXPORT_SYNC_FILE_VALUE_LO 1
++#define VCMD_SYNC_EXPORT_SYNC_FILE_VALUE_HI 2
++/* resp status dword, then 1 fd if status == OK */
++
+ enum vcmd_submit_cmd2_flag {
+    VCMD_SUBMIT_CMD2_FLAG_RING_IDX = 1 << 0,
+    VCMD_SUBMIT_CMD2_FLAG_IN_FENCE_FD = 1 << 1,
+@@ -349,4 +368,13 @@ struct vcmd_submit_cmd2_batch {
+ #define VCMD_RESOURCE_EXPORT_FD_RES_HANDLE 0
+ /* rsp fd */
+ 
++/* The command is followed by a dma-buf or memfd sent with SCM_RIGHTS.  A
++ * memfd is wrapped in a udmabuf, padded to at least SIZE.  SIZE may be 0 to
++ * use the size of the fd.
++ */
++#define VCMD_RESOURCE_IMPORT_FD_SIZE 2
++#define VCMD_RESOURCE_IMPORT_FD_SIZE_LO 0
++#define VCMD_RESOURCE_IMPORT_FD_SIZE_HI 1
++/* resp res_id */
++
+ #endif /* VTEST_PROTOCOL */
+diff --git a/src/virtio/vulkan/vn_android.c b/src/virtio/vulkan/vn_android.c
+index 52ed522..24948ae 100644
+--- a/src/virtio/vulkan/vn_android.c
++++ b/src/virtio/vulkan/vn_android.c
+@@ -11,16 +11,21 @@
+ #include "vn_android.h"
+ 
+ #include <dlfcn.h>
++#include <strings.h>
+ #include <vndk/hardware_buffer.h>
+ 
+ #include "util/os_file.h"
++#include "util/stack_array.h"
+ #include "util/u_gralloc/u_gralloc.h"
+ #include "vk_android.h"
++#include "vk_common_entrypoints.h"
+ 
+ #include "vn_buffer.h"
+ #include "vn_device.h"
+ #include "vn_device_memory.h"
+ #include "vn_image.h"
++#include "vn_physical_device.h"
++#include "vn_queue.h"
+ 
+ struct vn_android_gralloc_buffer_properties {
+    uint32_t num_planes;
+@@ -34,21 +39,20 @@ struct vn_android_gralloc_buffer_properties {
+ static bool
+ vn_android_gralloc_get_buffer_properties(
+    buffer_handle_t handle,
++   uint32_t pixel_stride,
++   int hal_format,
+    struct vn_android_gralloc_buffer_properties *out_props)
+ {
+    struct u_gralloc *gralloc = vk_android_get_ugralloc();
+    struct u_gralloc_buffer_basic_info info;
+ 
+-   /*
+-    * We only support (and care of) CrOS and IMapper v4 gralloc modules
+-    * at this point. They don't need the pixel stride and HAL format
+-    * to be provided externally to them. It allows integrating u_gralloc
+-    * with minimal modifications at this point.
++   /* CrOS and IMapper gralloc modules ignore the pixel stride and HAL
++    * format, but the fallback module computes the layout from them.
+     */
+    struct u_gralloc_buffer_handle ugb_handle = {
+       .handle = handle,
+-      .pixel_stride = 0,
+-      .hal_format = 0,
++      .pixel_stride = pixel_stride,
++      .hal_format = hal_format,
+    };
+ 
+    if (u_gralloc_get_buffer_basic_info(gralloc, &ugb_handle, &info) != 0) {
+@@ -56,6 +60,13 @@ vn_android_gralloc_get_buffer_properties(
+       return false;
+    }
+ 
++   /* Grallocs that fall back are not GPU allocators, such as the default
++    * gralloc allocating from memfd, so their buffers are linear.
++    */
++   if (info.modifier == DRM_FORMAT_MOD_INVALID &&
++       u_gralloc_get_type(gralloc) == U_GRALLOC_TYPE_FALLBACK)
++      info.modifier = DRM_FORMAT_MOD_LINEAR;
++
+    if (info.modifier == DRM_FORMAT_MOD_INVALID) {
+       vn_log(NULL, "Unexpected DRM_FORMAT_MOD_INVALID");
+       return false;
+@@ -160,6 +171,8 @@ static VkResult
+ vn_android_get_image_builder(struct vn_device *dev,
+                              const VkImageCreateInfo *create_info,
+                              const native_handle_t *handle,
++                             uint32_t pixel_stride,
++                             int hal_format,
+                              struct vn_android_image_builder *out_builder)
+ {
+    /* Android image builder is only used by ANB or AHB. For ANB, Android
+@@ -173,7 +186,8 @@ vn_android_get_image_builder(struct vn_device *dev,
+                                 EXTERNAL_MEMORY_IMAGE_CREATE_INFO));
+ 
+    struct vn_android_gralloc_buffer_properties buf_props;
+-   if (!vn_android_gralloc_get_buffer_properties(handle, &buf_props))
++   if (!vn_android_gralloc_get_buffer_properties(handle, pixel_stride,
++                                                 hal_format, &buf_props))
+       return VK_ERROR_INVALID_EXTERNAL_HANDLE;
+ 
+    /* fill VkImageCreateInfo */
+@@ -181,6 +195,13 @@ vn_android_get_image_builder(struct vn_device *dev,
+    out_builder->create = *create_info;
+    out_builder->create.tiling = VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT;
+ 
++   /* NVIDIA rejects input attachment usage on linear images.  ANGLE adds it
++    * to every renderable AHB image, but only framebuffer fetch reads them as
++    * input attachments.
++    */
++   if (buf_props.modifier == DRM_FORMAT_MOD_LINEAR)
++      out_builder->create.usage &= ~VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT;
++
+    /* fill VkImageDrmFormatModifierExplicitCreateInfoEXT */
+    for (uint32_t i = 0; i < buf_props.num_planes; i++) {
+       out_builder->layouts[i].offset = buf_props.offset[i];
+@@ -260,6 +281,7 @@ vn_android_image_from_anb_internal(struct vn_device *dev,
+ 
+    struct vn_android_image_builder builder;
+    result = vn_android_get_image_builder(dev, create_info, anb_info->handle,
++                                         anb_info->stride, anb_info->format,
+                                          &builder);
+    if (result != VK_SUCCESS)
+       return result;
+@@ -309,15 +331,16 @@ vn_android_image_from_anb_internal(struct vn_device *dev,
+       goto fail;
+    }
+ 
+-   const bool prefer_dedicated =
+-      img->requirements[0].dedicated.prefersDedicatedAllocation == VK_TRUE;
++   /* Always dedicated: NVIDIA fails non-dedicated dma-buf imports without
++    * reporting prefersDedicatedAllocation.
++    */
+    const VkMemoryDedicatedAllocateInfo dedicated_info = {
+       .sType = VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO,
+       .image = vn_image_to_handle(img),
+    };
+    const VkImportMemoryFdInfoKHR import_fd_info = {
+       .sType = VK_STRUCTURE_TYPE_IMPORT_MEMORY_FD_INFO_KHR,
+-      .pNext = prefer_dedicated ? &dedicated_info : NULL,
++      .pNext = &dedicated_info,
+       .handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT,
+       .fd = dup_fd,
+    };
+@@ -349,6 +372,94 @@ fail:
+    return result;
+ }
+ 
++/* NVIDIA faults when drawing into a linear color attachment while a depth or
++ * stencil attachment is bound, which every HWUI window does.  ANB images from
++ * grallocs without a GPU are linear, so render them through an optimal shadow
++ * image that vn_QueueSignalReleaseImageANDROID copies to the linear image.
++ * Buffers the gralloc placed in GPU memory are tiled and render directly.
++ */
++static bool
++vn_android_anb_needs_shadow(const VkImageCreateInfo *create_info,
++                            const VkNativeBufferANDROID *anb_info)
++{
++   struct u_gralloc *gralloc = vk_android_get_ugralloc();
++   if (!(create_info->usage & VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT) ||
++       !gralloc || u_gralloc_get_type(gralloc) != U_GRALLOC_TYPE_FALLBACK)
++      return false;
++   struct vn_android_gralloc_buffer_properties props;
++   return !vn_android_gralloc_get_buffer_properties(
++             anb_info->handle, anb_info->stride, anb_info->format, &props) ||
++          props.modifier == DRM_FORMAT_MOD_LINEAR;
++}
++
++static VkResult
++vn_android_image_create_shadow(struct vn_device *dev,
++                               const VkImageCreateInfo *create_info,
++                               const VkAllocationCallbacks *alloc,
++                               struct vn_image *linear,
++                               struct vn_image **out_img)
++{
++   VkDevice dev_handle = vn_device_to_handle(dev);
++
++   VkImageCreateInfo info = *create_info;
++   info.tiling = VK_IMAGE_TILING_OPTIMAL;
++   info.usage |= VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
++
++   struct vn_image *img;
++   VkResult result = vn_image_create(dev, &info, alloc, &img);
++   if (result != VK_SUCCESS)
++      return result;
++
++   const VkMemoryRequirements *req =
++      &img->requirements[0].memory.memoryRequirements;
++   const VkPhysicalDeviceMemoryProperties *mem_props =
++      &dev->physical_device->memory_properties;
++   uint32_t mem_type = ffs(req->memoryTypeBits) - 1;
++   for (uint32_t i = 0; i < mem_props->memoryTypeCount; i++) {
++      if ((req->memoryTypeBits & (1u << i)) &&
++          (mem_props->memoryTypes[i].propertyFlags &
++           VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)) {
++         mem_type = i;
++         break;
++      }
++   }
++
++   const VkMemoryDedicatedAllocateInfo dedicated_info = {
++      .sType = VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO,
++      .image = vn_image_to_handle(img),
++   };
++   const VkMemoryAllocateInfo mem_info = {
++      .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
++      .pNext = &dedicated_info,
++      .allocationSize = req->size,
++      .memoryTypeIndex = mem_type,
++   };
++   VkDeviceMemory mem;
++   result = vn_AllocateMemory(dev_handle, &mem_info, alloc, &mem);
++   if (result != VK_SUCCESS) {
++      vn_DestroyImage(dev_handle, vn_image_to_handle(img), alloc);
++      return result;
++   }
++
++   const VkBindImageMemoryInfo bind_info = {
++      .sType = VK_STRUCTURE_TYPE_BIND_IMAGE_MEMORY_INFO,
++      .image = vn_image_to_handle(img),
++      .memory = mem,
++   };
++   result = vn_BindImageMemory2(dev_handle, 1, &bind_info);
++   if (result != VK_SUCCESS) {
++      vn_FreeMemory(dev_handle, mem, alloc);
++      vn_DestroyImage(dev_handle, vn_image_to_handle(img), alloc);
++      return result;
++   }
++
++   img->wsi.shadow_mem = vn_device_memory_from_handle(mem);
++   img->wsi.anb_linear = linear;
++   *out_img = img;
++
++   return VK_SUCCESS;
++}
++
+ VkResult
+ vn_android_image_from_anb(struct vn_device *dev,
+                           const VkImageCreateInfo *create_info,
+@@ -356,9 +467,14 @@ vn_android_image_from_anb(struct vn_device *dev,
+                           const VkAllocationCallbacks *alloc,
+                           struct vn_image **out_img)
+ {
++   const bool needs_shadow = vn_android_anb_needs_shadow(create_info, anb_info);
++   VkImageCreateInfo linear_info = *create_info;
++   if (needs_shadow)
++      linear_info.usage |= VK_IMAGE_USAGE_TRANSFER_DST_BIT;
++
+    struct vn_image *img = NULL;
+    VkResult result = vn_android_image_from_anb_internal(
+-      dev, create_info, anb_info, alloc, &img);
++      dev, &linear_info, anb_info, alloc, &img);
+    if (result != VK_SUCCESS)
+       return result;
+ 
+@@ -374,10 +490,216 @@ vn_android_image_from_anb(struct vn_device *dev,
+       return result;
+    }
+ 
++   if (needs_shadow) {
++      struct vn_image *shadow;
++      result =
++         vn_android_image_create_shadow(dev, create_info, alloc, img, &shadow);
++      if (result != VK_SUCCESS) {
++         vn_DestroyImage(vn_device_to_handle(dev), vn_image_to_handle(img),
++                         alloc);
++         return result;
++      }
++      img = shadow;
++   }
++
+    *out_img = img;
+    return VK_SUCCESS;
+ }
+ 
++static VkResult
++vn_android_record_shadow_copy(struct vn_device *dev,
++                              struct vn_image *img,
++                              uint32_t queue_family)
++{
++   if (img->wsi.shadow_cmd && img->wsi.shadow_queue_family == queue_family)
++      return VK_SUCCESS;
++
++   VkDevice dev_handle = vn_device_to_handle(dev);
++   const struct vk_device_dispatch_table *disp = &dev->base.vk.dispatch_table;
++   VkResult result;
++
++   if (!img->wsi.shadow_fence) {
++      const VkFenceCreateInfo fence_info = {
++         .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO,
++      };
++      result = disp->CreateFence(dev_handle, &fence_info, NULL,
++                                 &img->wsi.shadow_fence);
++      if (result != VK_SUCCESS)
++         return result;
++   }
++
++   if (img->wsi.shadow_pool) {
++      disp->DestroyCommandPool(dev_handle, img->wsi.shadow_pool, NULL);
++      img->wsi.shadow_pool = VK_NULL_HANDLE;
++      img->wsi.shadow_cmd = VK_NULL_HANDLE;
++   }
++
++   const VkCommandPoolCreateInfo pool_info = {
++      .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
++      .queueFamilyIndex = queue_family,
++   };
++   VkCommandPool pool;
++   result = disp->CreateCommandPool(dev_handle, &pool_info, NULL, &pool);
++   if (result != VK_SUCCESS)
++      return result;
++
++   const VkCommandBufferAllocateInfo cmd_info = {
++      .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
++      .commandPool = pool,
++      .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
++      .commandBufferCount = 1,
++   };
++   VkCommandBuffer cmd;
++   result = disp->AllocateCommandBuffers(dev_handle, &cmd_info, &cmd);
++   if (result != VK_SUCCESS)
++      goto fail;
++
++   const VkCommandBufferBeginInfo begin_info = {
++      .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
++   };
++   result = disp->BeginCommandBuffer(cmd, &begin_info);
++   if (result != VK_SUCCESS)
++      goto fail;
++
++   const VkImageSubresourceRange range = {
++      .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
++      .levelCount = 1,
++      .layerCount = 1,
++   };
++   const VkImageMemoryBarrier to_copy[2] = {
++      {
++         .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
++         .srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT,
++         .dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT,
++         .oldLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
++         .newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
++         .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
++         .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
++         .image = vn_image_to_handle(img),
++         .subresourceRange = range,
++      },
++      {
++         .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
++         .dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
++         .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED,
++         .newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
++         .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
++         .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
++         .image = vn_image_to_handle(img->wsi.anb_linear),
++         .subresourceRange = range,
++      },
++   };
++   disp->CmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
++                            VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 0,
++                            NULL, 2, to_copy);
++
++   const VkImageCopy region = {
++      .srcSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 },
++      .dstSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 },
++      .extent = img->base.vk.extent,
++   };
++   disp->CmdCopyImage(cmd, vn_image_to_handle(img),
++                      VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
++                      vn_image_to_handle(img->wsi.anb_linear),
++                      VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
++
++   /* concurrent images take no queue family ownership transfers */
++   const bool concurrent = img->wsi.anb_linear->base.vk.sharing_mode ==
++                           VK_SHARING_MODE_CONCURRENT;
++   const VkImageMemoryBarrier after_copy[2] = {
++      {
++         .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
++         .srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT,
++         .oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
++         .newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
++         .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
++         .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
++         .image = vn_image_to_handle(img),
++         .subresourceRange = range,
++      },
++      {
++         .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
++         .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
++         .oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
++         .newLayout = VK_IMAGE_LAYOUT_GENERAL,
++         .srcQueueFamilyIndex = concurrent ? VK_QUEUE_FAMILY_IGNORED : queue_family,
++         .dstQueueFamilyIndex =
++            concurrent ? VK_QUEUE_FAMILY_IGNORED : VK_QUEUE_FAMILY_FOREIGN_EXT,
++         .image = vn_image_to_handle(img->wsi.anb_linear),
++         .subresourceRange = range,
++      },
++   };
++   disp->CmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
++                            VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, 0, 0, NULL,
++                            0, NULL, 2, after_copy);
++
++   result = disp->EndCommandBuffer(cmd);
++   if (result != VK_SUCCESS)
++      goto fail;
++
++   /* only a completely recorded command buffer is ever cached */
++   img->wsi.shadow_pool = pool;
++   img->wsi.shadow_cmd = cmd;
++   img->wsi.shadow_queue_family = queue_family;
++   return VK_SUCCESS;
++
++fail:
++   disp->DestroyCommandPool(dev_handle, pool, NULL);
++   return result;
++}
++
++VKAPI_ATTR VkResult VKAPI_CALL
++vn_QueueSignalReleaseImageANDROID(VkQueue _queue,
++                                  uint32_t waitSemaphoreCount,
++                                  const VkSemaphore *pWaitSemaphores,
++                                  VkImage image,
++                                  int *pNativeFenceFd)
++{
++   struct vn_image *img = vn_image_from_handle(image);
++   if (!img->wsi.anb_linear) {
++      return vk_common_QueueSignalReleaseImageANDROID(
++         _queue, waitSemaphoreCount, pWaitSemaphores, image, pNativeFenceFd);
++   }
++
++   struct vn_queue *queue = vn_queue_from_handle(_queue);
++   struct vn_device *dev =
++      vn_device_from_handle(vk_device_to_handle(queue->base.vk.base.device));
++   VkDevice dev_handle = vn_device_to_handle(dev);
++   const struct vk_device_dispatch_table *disp = &dev->base.vk.dispatch_table;
++
++   VkResult result = vn_android_record_shadow_copy(
++      dev, img, queue->base.vk.queue_family_index);
++   if (result != VK_SUCCESS)
++      return vn_error(dev->instance, result);
++
++   STACK_ARRAY(VkPipelineStageFlags, wait_stages, waitSemaphoreCount);
++   for (uint32_t i = 0; i < waitSemaphoreCount; i++)
++      wait_stages[i] = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
++   const VkSubmitInfo submit_info = {
++      .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
++      .waitSemaphoreCount = waitSemaphoreCount,
++      .pWaitSemaphores = pWaitSemaphores,
++      .pWaitDstStageMask = wait_stages,
++      .commandBufferCount = 1,
++      .pCommandBuffers = &img->wsi.shadow_cmd,
++   };
++   result =
++      disp->QueueSubmit(_queue, 1, &submit_info, img->wsi.shadow_fence);
++   STACK_ARRAY_FINISH(wait_stages);
++   if (result != VK_SUCCESS)
++      return vn_error(dev->instance, result);
++
++   result = disp->WaitForFences(dev_handle, 1, &img->wsi.shadow_fence,
++                                VK_TRUE, UINT64_MAX);
++   if (result != VK_SUCCESS)
++      return vn_error(dev->instance, result);
++   disp->ResetFences(dev_handle, 1, &img->wsi.shadow_fence);
++
++   /* the copy has completed, so the native fence is already signaled */
++   *pNativeFenceFd = -1;
++   return VK_SUCCESS;
++}
++
+ struct vn_device_memory *
+ vn_android_get_wsi_memory_from_bind_info(
+    struct vn_device *dev, const VkBindImageMemoryInfo *bind_info)
+@@ -395,6 +717,41 @@ vn_android_get_wsi_memory_from_bind_info(
+    return img->wsi.anb_mem;
+ }
+ 
++VKAPI_ATTR VkResult VKAPI_CALL
++vn_GetAndroidHardwareBufferPropertiesANDROID(
++   VkDevice device,
++   const struct AHardwareBuffer *buffer,
++   VkAndroidHardwareBufferPropertiesANDROID *pProperties)
++{
++   VkResult result = vk_common_GetAndroidHardwareBufferPropertiesANDROID(
++      device, buffer, pProperties);
++   if (result != VK_SUCCESS)
++      return result;
++
++   /* Buffers in system memory, such as memfds that the renderer wraps in
++    * udmabufs, only import into system memory types.  ANGLE releases before
++    * 2024 require a device-local type for AHB imports, so also advertise the
++    * device-local types that are not host-visible.  The import falls back to
++    * a compatible type in vn_android_device_import_ahb.
++    */
++   const struct vn_device *dev = vn_device_from_handle(device);
++   const VkPhysicalDeviceMemoryProperties *mem_props =
++      &dev->physical_device->memory_properties;
++   uint32_t device_local_bits = 0;
++   for (uint32_t i = 0; i < mem_props->memoryTypeCount; i++) {
++      const VkMemoryPropertyFlags flags = mem_props->memoryTypes[i].propertyFlags;
++      if (!(flags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT))
++         continue;
++      if (pProperties->memoryTypeBits & (1u << i))
++         return VK_SUCCESS;
++      if (!(flags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT))
++         device_local_bits |= 1u << i;
++   }
++   pProperties->memoryTypeBits |= device_local_bits;
++
++   return VK_SUCCESS;
++}
++
+ VkResult
+ vn_android_device_import_ahb(struct vn_device *dev,
+                              struct vn_device_memory *mem,
+@@ -422,9 +779,13 @@ vn_android_device_import_ahb(struct vn_device *dev,
+       struct vn_image *img = vn_image_from_handle(dedicated_info->image);
+ 
+       /* If ahb is for an image, finish the deferred image creation first */
++      AHardwareBuffer_Desc desc;
++      AHardwareBuffer_describe(mem_vk->ahardware_buffer, &desc);
++
+       struct vn_android_image_builder builder;
+       result = vn_android_get_image_builder(dev, &img->deferred_info->create,
+-                                            handle, &builder);
++                                            handle, desc.stride, desc.format,
++                                            &builder);
+       if (result != VK_SUCCESS)
+          return result;
+ 
+@@ -446,7 +807,7 @@ vn_android_device_import_ahb(struct vn_device *dev,
+    if (!mem_reqs.memoryTypeBits)
+       return VK_ERROR_INVALID_EXTERNAL_HANDLE;
+ 
+-   if (!((1 << mem_vk->memory_type_index) & mem_reqs.memoryTypeBits))
++   if (!((1u << mem_vk->memory_type_index) & mem_reqs.memoryTypeBits))
+       mem_vk->memory_type_index = ffs(mem_reqs.memoryTypeBits) - 1;
+ 
+    mem_vk->size = mem_reqs.size;
+diff --git a/src/virtio/vulkan/vn_image.c b/src/virtio/vulkan/vn_image.c
+index b5743aa..91c21fa 100644
+--- a/src/virtio/vulkan/vn_image.c
++++ b/src/virtio/vulkan/vn_image.c
+@@ -720,6 +720,18 @@ vn_DestroyImage(VkDevice device,
+       vn_FreeMemory(device, mem_handle, pAllocator);
+    }
+ 
++   if (img->wsi.anb_linear) {
++      const struct vk_device_dispatch_table *disp = &dev->base.vk.dispatch_table;
++      if (img->wsi.shadow_fence)
++         disp->DestroyFence(device, img->wsi.shadow_fence, NULL);
++      if (img->wsi.shadow_pool)
++         disp->DestroyCommandPool(device, img->wsi.shadow_pool, NULL);
++      vn_DestroyImage(device, vn_image_to_handle(img->wsi.anb_linear),
++                      pAllocator);
++      vn_FreeMemory(device, vn_device_memory_to_handle(img->wsi.shadow_mem),
++                    pAllocator);
++   }
++
+    /* must not ask renderer to destroy uninitialized deferred image */
+    if (!img->deferred_info || img->deferred_info->initialized)
+       vn_async_vkDestroyImage(dev->primary_ring, device, image, NULL);
+diff --git a/src/virtio/vulkan/vn_image.h b/src/virtio/vulkan/vn_image.h
+index 4e18632..cac667d 100644
+--- a/src/virtio/vulkan/vn_image.h
++++ b/src/virtio/vulkan/vn_image.h
+@@ -69,6 +69,17 @@ struct vn_image {
+ 
+       /* For VK_ANDROID_native_buffer, the WSI image owns the memory. */
+       struct vn_device_memory *anb_mem;
++
++      /* For VK_ANDROID_native_buffer images rendered through an optimal
++       * shadow image: the linear image bound to anb_mem, the memory of the
++       * shadow image, and the copy to the linear image at release.
++       */
++      struct vn_image *anb_linear;
++      struct vn_device_memory *shadow_mem;
++      VkCommandPool shadow_pool;
++      VkCommandBuffer shadow_cmd;
++      VkFence shadow_fence;
++      uint32_t shadow_queue_family;
+    } wsi;
+ };
+ VK_DEFINE_NONDISP_HANDLE_CASTS(vn_image,
+diff --git a/src/virtio/vulkan/vn_queue.c b/src/virtio/vulkan/vn_queue.c
+index 9756142..13488c9 100644
+--- a/src/virtio/vulkan/vn_queue.c
++++ b/src/virtio/vulkan/vn_queue.c
+@@ -1908,10 +1908,30 @@ vn_create_sync_file(struct vn_device *dev,
+       return vn_error(dev->instance, result);
+    }
+ 
++   if (!dev->renderer->sync_ops.export_syncobj) {
++      /* vtest cannot share kernel sync files, so wait here and return the
++       * already-signaled sync fd -1
++       */
++      const struct vn_renderer_wait wait = {
++         .timeout = UINT64_MAX,
++         .syncs = &sync,
++         .sync_values = &(const uint64_t){ 1 },
++         .sync_count = 1,
++      };
++      result = vn_renderer_wait(dev->renderer, &wait);
++      vn_renderer_sync_destroy(dev->renderer, sync);
++      *out_fd = -1;
++      return result == VK_SUCCESS ? VK_SUCCESS
++                                  : vn_error(dev->instance, VK_ERROR_DEVICE_LOST);
++   }
++
+    *out_fd = vn_renderer_sync_export_syncobj(dev->renderer, sync, true);
+    vn_renderer_sync_destroy(dev->renderer, sync);
+ 
+-   return *out_fd >= 0 ? VK_SUCCESS : VK_ERROR_TOO_MANY_OBJECTS;
++   /* -1 is a valid already-signaled sync file (see vn_sync_valid_fd);
++    * transports return < -1 on error
++    */
++   return *out_fd >= -1 ? VK_SUCCESS : VK_ERROR_TOO_MANY_OBJECTS;
+ }
+ 
+ static inline bool
+diff --git a/src/virtio/vulkan/vn_renderer_vtest.c b/src/virtio/vulkan/vn_renderer_vtest.c
+index 5fad0b0..6c283c9 100644
+--- a/src/virtio/vulkan/vn_renderer_vtest.c
++++ b/src/virtio/vulkan/vn_renderer_vtest.c
+@@ -11,6 +11,7 @@
+ #include <netinet/in.h>
+ #include <poll.h>
+ #include <sys/mman.h>
++#include <sys/stat.h>
+ #include <sys/socket.h>
+ #include <sys/types.h>
+ #include <sys/un.h>
+@@ -56,6 +57,7 @@ struct vtest {
+ 
+    uint32_t protocol_version;
+    uint32_t max_timeline_count;
++   bool has_venus_sync_fd;
+ 
+    struct {
+       uint32_t id;
+@@ -101,7 +103,8 @@ vtest_read(struct vtest *vtest, void *buf, size_t size)
+ {
+    do {
+       const ssize_t ret = read(vtest->sock_fd, buf, size);
+-      if (unlikely(ret < 0)) {
++      /* 0 means the server closed the connection */
++      if (unlikely(ret <= 0)) {
+          vn_log(vtest->instance,
+                 "lost connection to rendering server on %zu read %zi %d",
+                 size, ret, errno);
+@@ -144,6 +147,34 @@ vtest_receive_fd(struct vtest *vtest)
+    return *((int *)CMSG_DATA(cmsg));
+ }
+ 
++static void
++vtest_send_fd(struct vtest *vtest, int fd)
++{
++   char cmsg_buf[CMSG_SPACE(sizeof(int))];
++   char dummy = 0;
++   struct msghdr msg = {
++      .msg_iov =
++         &(struct iovec){
++            .iov_base = &dummy,
++            .iov_len = sizeof(dummy),
++         },
++      .msg_iovlen = 1,
++      .msg_control = cmsg_buf,
++      .msg_controllen = sizeof(cmsg_buf),
++   };
++
++   struct cmsghdr *cmsg = CMSG_FIRSTHDR(&msg);
++   cmsg->cmsg_level = SOL_SOCKET;
++   cmsg->cmsg_type = SCM_RIGHTS;
++   cmsg->cmsg_len = CMSG_LEN(sizeof(int));
++   memcpy(CMSG_DATA(cmsg), &fd, sizeof(fd));
++
++   if (sendmsg(vtest->sock_fd, &msg, 0) < 0) {
++      vn_log(vtest->instance, "sendmsg failed: %s", strerror(errno));
++      abort();
++   }
++}
++
+ static void
+ vtest_write(struct vtest *vtest, const void *buf, size_t size)
+ {
+@@ -363,6 +394,32 @@ vtest_vcmd_resource_unref(struct vtest *vtest, uint32_t res_id)
+    vtest_write(vtest, vcmd_res_unref, sizeof(vcmd_res_unref));
+ }
+ 
++static uint32_t
++vtest_vcmd_resource_import_fd(struct vtest *vtest, uint64_t size, int fd)
++{
++   uint32_t vtest_hdr[VTEST_HDR_SIZE];
++   uint32_t vcmd_import_fd[VCMD_RESOURCE_IMPORT_FD_SIZE];
++
++   vtest_hdr[VTEST_CMD_LEN] = VCMD_RESOURCE_IMPORT_FD_SIZE;
++   vtest_hdr[VTEST_CMD_ID] = VCMD_RESOURCE_IMPORT_FD;
++
++   vcmd_import_fd[VCMD_RESOURCE_IMPORT_FD_SIZE_LO] = (uint32_t)size;
++   vcmd_import_fd[VCMD_RESOURCE_IMPORT_FD_SIZE_HI] = (uint32_t)(size >> 32);
++
++   vtest_write(vtest, vtest_hdr, sizeof(vtest_hdr));
++   vtest_write(vtest, vcmd_import_fd, sizeof(vcmd_import_fd));
++   vtest_send_fd(vtest, fd);
++
++   vtest_read(vtest, vtest_hdr, sizeof(vtest_hdr));
++   assert(vtest_hdr[VTEST_CMD_LEN] == 1);
++   assert(vtest_hdr[VTEST_CMD_ID] == VCMD_RESOURCE_IMPORT_FD);
++
++   uint32_t res_id;
++   vtest_read(vtest, &res_id, sizeof(res_id));
++
++   return res_id;
++}
++
+ static uint32_t
+ vtest_vcmd_sync_create(struct vtest *vtest, uint64_t initial_val)
+ {
+@@ -510,6 +567,41 @@ submit_cmd2_sizes(const struct vn_renderer_submit *submit,
+    assert(*sync_size % sizeof(uint32_t) == 0);
+ }
+ 
++static int
++vtest_vcmd_sync_export_sync_file(struct vtest *vtest,
++                                 uint32_t sync_id,
++                                 uint64_t value)
++{
++   uint32_t vtest_hdr[VTEST_HDR_SIZE];
++   uint32_t vcmd_export[VCMD_SYNC_EXPORT_SYNC_FILE_SIZE];
++
++   vtest_hdr[VTEST_CMD_LEN] = VCMD_SYNC_EXPORT_SYNC_FILE_SIZE;
++   vtest_hdr[VTEST_CMD_ID] = VCMD_SYNC_EXPORT_SYNC_FILE;
++   vcmd_export[VCMD_SYNC_EXPORT_SYNC_FILE_ID] = sync_id;
++   vcmd_export[VCMD_SYNC_EXPORT_SYNC_FILE_VALUE_LO] = (uint32_t)value;
++   vcmd_export[VCMD_SYNC_EXPORT_SYNC_FILE_VALUE_HI] = (uint32_t)(value >> 32);
++
++   vtest_write(vtest, vtest_hdr, sizeof(vtest_hdr));
++   vtest_write(vtest, vcmd_export, sizeof(vcmd_export));
++
++   vtest_read(vtest, vtest_hdr, sizeof(vtest_hdr));
++   assert(vtest_hdr[VTEST_CMD_ID] == VCMD_SYNC_EXPORT_SYNC_FILE);
++
++   uint32_t status;
++   vtest_read(vtest, &status, sizeof(status));
++
++   switch (status) {
++   case VCMD_SYNC_EXPORT_SYNC_FILE_OK:
++      return vtest_receive_fd(vtest);
++   case VCMD_SYNC_EXPORT_SYNC_FILE_SIGNALED:
++      /* -1 is the conventional already-signaled sync_file */
++      return -1;
++   default:
++      return -EINVAL;
++   }
++}
++
++
+ static void
+ vtest_vcmd_submit_cmd2(struct vtest *vtest,
+                        const struct vn_renderer_submit *submit)
+@@ -613,6 +705,29 @@ vtest_sync_reset(struct vn_renderer *renderer,
+    return vtest_sync_write(renderer, sync, initial_val);
+ }
+ 
++static int
++vtest_sync_export_syncobj(struct vn_renderer *renderer,
++                          struct vn_renderer_sync *_sync,
++                          bool sync_file)
++{
++   struct vtest *vtest = (struct vtest *)renderer;
++   struct vtest_sync *sync = (struct vtest_sync *)_sync;
++
++   /* only sync_file fds are useful across the socket */
++   if (!sync_file || !vtest->has_venus_sync_fd)
++      return -ENOTSUP;
++
++   /* Resolve the (binary) sync's signal point to the pending submit's
++    * VkFence on the server and export a sync_file from it.  -1 means the
++    * point already retired (already-signaled sync_file convention).
++    */
++   mtx_lock(&vtest->sock_mutex);
++   const int fd = vtest_vcmd_sync_export_sync_file(vtest, sync->base.sync_id, 1);
++   mtx_unlock(&vtest->sock_mutex);
++
++   return fd;
++}
++
+ static void
+ vtest_sync_destroy(struct vn_renderer *renderer,
+                    struct vn_renderer_sync *_sync)
+@@ -778,6 +893,55 @@ vtest_bo_create_from_device_memory(
+    return VK_SUCCESS;
+ }
+ 
++static VkResult
++vtest_bo_create_from_dma_buf(struct vn_renderer *renderer,
++                             VkDeviceSize size,
++                             int fd,
++                             VkMemoryPropertyFlags flags,
++                             struct vn_renderer_bo **out_bo)
++{
++   struct vtest *vtest = (struct vtest *)renderer;
++
++   /* the server needs its own fd, which might also be a memfd that it wraps
++    * in a udmabuf; the client keeps mapping the original fd
++    */
++   int res_fd = os_dupfd_cloexec(fd);
++   if (res_fd < 0)
++      return VK_ERROR_TOO_MANY_OBJECTS;
++
++   mtx_lock(&vtest->sock_mutex);
++   const uint32_t res_id = vtest_vcmd_resource_import_fd(vtest, size, fd);
++   mtx_unlock(&vtest->sock_mutex);
++   if (!res_id) {
++      close(res_fd);
++      return VK_ERROR_INVALID_EXTERNAL_HANDLE;
++   }
++
++   /* the server pads memfds with its own pages, which the client cannot
++    * map, so the client mapping must not reach past the end of the fd.
++    * fstat rather than lseek, which would move the offset the fd shares
++    * with its gralloc handle.
++    */
++   struct stat st;
++   const bool mappable = (flags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) &&
++                         fstat(fd, &st) == 0 && (VkDeviceSize)st.st_size >= size;
++   struct vtest_bo *bo = util_sparse_array_get(&vtest->bo_array, res_id);
++   *bo = (struct vtest_bo){
++      .base = {
++         .refcount = VN_REFCOUNT_INIT(1),
++         .res_id = res_id,
++         .mmap_size = mappable ? size : 0,
++      },
++      .res_fd = res_fd,
++      .blob_flags = (mappable ? VCMD_BLOB_FLAG_MAPPABLE : 0) |
++                    VCMD_BLOB_FLAG_SHAREABLE,
++   };
++
++   *out_bo = &bo->base;
++
++   return VK_SUCCESS;
++}
++
+ static void
+ vtest_shmem_destroy_now(struct vn_renderer *renderer,
+                         struct vn_renderer_shmem *_shmem)
+@@ -930,8 +1094,8 @@ vtest_init_renderer_info(struct vtest *vtest)
+    info->pci.vendor_id = VTEST_PCI_VENDOR_ID;
+    info->pci.device_id = VTEST_PCI_DEVICE_ID;
+ 
+-   info->has_dma_buf_import = false;
+-   info->has_external_sync = false;
++   info->has_dma_buf_import = vtest->protocol_version >= 5;
++   info->has_external_sync = vtest->has_venus_sync_fd;
+    info->has_implicit_fencing = false;
+ 
+    const struct virgl_renderer_capset_venus *capset = &vtest->capset.data;
+@@ -1001,6 +1165,9 @@ vtest_init_params(struct vtest *vtest)
+    }
+    vtest->max_timeline_count = val;
+ 
++   vtest->has_venus_sync_fd =
++      vtest_vcmd_get_param(vtest, VCMD_PARAM_HAS_VENUS_SYNC_FD);
++
+    return VK_SUCCESS;
+ }
+ 
+@@ -1070,7 +1237,8 @@ vtest_init(struct vtest *vtest)
+ 
+    vtest->base.bo_ops.create_from_device_memory =
+       vtest_bo_create_from_device_memory;
+-   vtest->base.bo_ops.create_from_dma_buf = NULL;
++   vtest->base.bo_ops.create_from_dma_buf =
++      vtest->protocol_version >= 5 ? vtest_bo_create_from_dma_buf : NULL;
+    vtest->base.bo_ops.destroy = vtest_bo_destroy;
+    vtest->base.bo_ops.export_dma_buf = vtest_bo_export_dma_buf;
+    vtest->base.bo_ops.export_sync_file =
+@@ -1082,7 +1250,7 @@ vtest_init(struct vtest *vtest)
+    vtest->base.sync_ops.create = vtest_sync_create;
+    vtest->base.sync_ops.create_from_syncobj = NULL;
+    vtest->base.sync_ops.destroy = vtest_sync_destroy;
+-   vtest->base.sync_ops.export_syncobj = NULL;
++   vtest->base.sync_ops.export_syncobj = vtest_sync_export_syncobj;
+    vtest->base.sync_ops.reset = vtest_sync_reset;
+    vtest->base.sync_ops.read = vtest_sync_read;
+    vtest->base.sync_ops.write = vtest_sync_write;

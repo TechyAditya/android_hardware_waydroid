@@ -1,0 +1,1002 @@
+diff --git a/server/render_context.c b/server/render_context.c
+index b44b5b5..718b1b5 100644
+--- a/server/render_context.c
++++ b/server/render_context.c
+@@ -23,6 +23,34 @@ render_context_update_timeline(struct render_context *ctx,
+       write_eventfd(ctx->fence_eventfd, 1);
+ }
+ 
++static bool
++render_context_dispatch_export_fence(struct render_context *ctx,
++                                     const union render_context_op_request *request,
++                                     UNUSED const int *fds,
++                                     UNUSED int fd_count)
++{
++   const struct render_context_op_export_fence_request *req = &request->export_fence;
++   struct render_context_op_export_fence_reply reply = {
++      .status = RENDER_CONTEXT_EXPORT_FENCE_ERROR,
++   };
++
++   int fd = -1;
++   const int ret =
++      render_state_export_fence(ctx->ctx_id, req->ring_index, req->seqno, &fd);
++   if (ret == 0) {
++      reply.status = RENDER_CONTEXT_EXPORT_FENCE_OK;
++      const bool ok =
++         render_socket_send_reply_with_fds(&ctx->socket, &reply, sizeof(reply), &fd, 1);
++      close(fd);
++      return ok;
++   }
++
++   if (ret == 1)
++      reply.status = RENDER_CONTEXT_EXPORT_FENCE_SIGNALED;
++
++   return render_socket_send_reply(&ctx->socket, &reply, sizeof(reply));
++}
++
+ static bool
+ render_context_dispatch_submit_fence(struct render_context *ctx,
+                                      const union render_context_op_request *request,
+@@ -188,6 +216,7 @@ static const struct render_context_dispatch_entry
+       RENDER_CONTEXT_DISPATCH(NOP, nop, 0),
+       RENDER_CONTEXT_DISPATCH(INIT, init, 2),
+       RENDER_CONTEXT_DISPATCH(CREATE_RESOURCE, create_resource, 0),
++      RENDER_CONTEXT_DISPATCH(EXPORT_FENCE, export_fence, 0),
+       RENDER_CONTEXT_DISPATCH(IMPORT_RESOURCE, import_resource, 1),
+       RENDER_CONTEXT_DISPATCH(DESTROY_RESOURCE, destroy_resource, 0),
+       RENDER_CONTEXT_DISPATCH(SUBMIT_CMD, submit_cmd, 0),
+diff --git a/server/render_protocol.h b/server/render_protocol.h
+index 7e38ac0..2d2a942 100644
+--- a/server/render_protocol.h
++++ b/server/render_protocol.h
+@@ -39,6 +39,7 @@ enum render_context_op {
+    RENDER_CONTEXT_OP_DESTROY_RESOURCE,
+    RENDER_CONTEXT_OP_SUBMIT_CMD,
+    RENDER_CONTEXT_OP_SUBMIT_FENCE,
++   RENDER_CONTEXT_OP_EXPORT_FENCE,
+ 
+    RENDER_CONTEXT_OP_COUNT,
+ };
+@@ -208,6 +209,33 @@ struct render_context_op_submit_fence_request {
+    uint32_t seqno;
+ };
+ 
++/* Export a sync_file fd for a previously submitted, not-yet-retired fence.
++ *
++ * The fence is identified by (ring_index, seqno) as used by
++ * RENDER_CONTEXT_OP_SUBMIT_FENCE.  The reply carries a status; when the
++ * status is RENDER_CONTEXT_EXPORT_FENCE_OK the reply is followed by 1 fd (a
++ * kernel sync_file exported from the fence's VkFence).
++ * RENDER_CONTEXT_EXPORT_FENCE_SIGNALED means the fence already retired or
++ * the driver reported it signaled (no fd follows; treat as an
++ * already-signaled sync_file).
++ */
++enum render_context_export_fence_status {
++   RENDER_CONTEXT_EXPORT_FENCE_OK = 0,
++   RENDER_CONTEXT_EXPORT_FENCE_SIGNALED = 1,
++   RENDER_CONTEXT_EXPORT_FENCE_ERROR = 2,
++};
++
++struct render_context_op_export_fence_request {
++   struct render_context_op_header header;
++   uint32_t ring_index;
++   uint32_t seqno;
++};
++
++struct render_context_op_export_fence_reply {
++   uint32_t status; /* enum render_context_export_fence_status */
++   /* followed by 1 fd if status == RENDER_CONTEXT_EXPORT_FENCE_OK */
++};
++
+ union render_context_op_request {
+    struct render_context_op_header header;
+    struct render_context_op_nop_request nop;
+@@ -217,6 +245,7 @@ union render_context_op_request {
+    struct render_context_op_destroy_resource_request destroy_resource;
+    struct render_context_op_submit_cmd_request submit_cmd;
+    struct render_context_op_submit_fence_request submit_fence;
++   struct render_context_op_export_fence_request export_fence;
+ };
+ 
+ #endif /* RENDER_PROTOCOL_H */
+diff --git a/server/render_state.c b/server/render_state.c
+index 715f85e..e5d4315 100644
+--- a/server/render_state.c
++++ b/server/render_state.c
+@@ -213,6 +213,13 @@ render_state_submit_fence(uint32_t ctx_id,
+    return vkr_renderer_submit_fence(ctx_id, flags, ring_idx, fence_id);
+ }
+ 
++int
++render_state_export_fence(uint32_t ctx_id, uint32_t ring_idx, uint64_t fence_id, int *out_fd)
++{
++   SCOPE_LOCK_RENDERER();
++   return vkr_renderer_export_fence(ctx_id, ring_idx, fence_id, out_fd);
++}
++
+ bool
+ render_state_create_resource(uint32_t ctx_id,
+                              uint32_t res_id,
+diff --git a/server/render_state.h b/server/render_state.h
+index 98de272..e271986 100644
+--- a/server/render_state.h
++++ b/server/render_state.h
+@@ -32,6 +32,10 @@ render_state_submit_fence(uint32_t ctx_id,
+                           uint64_t ring_idx,
+                           uint64_t fence_id);
+ 
++/* returns 0 (fd exported), 1 (already signaled), negative errno on error */
++int
++render_state_export_fence(uint32_t ctx_id, uint32_t ring_idx, uint64_t fence_id, int *out_fd);
++
+ bool
+ render_state_create_resource(uint32_t ctx_id,
+                              uint32_t res_id,
+diff --git a/src/proxy/proxy_context.c b/src/proxy/proxy_context.c
+index dc23ef5..24c6749 100644
+--- a/src/proxy/proxy_context.c
++++ b/src/proxy/proxy_context.c
+@@ -193,6 +193,79 @@ proxy_context_sync_thread(void *arg)
+    return 0;
+ }
+ 
++static int
++proxy_context_export_fence(struct virgl_context *base,
++                           uint32_t ring_idx,
++                           uint64_t fence_id,
++                           int *out_fd)
++{
++   struct proxy_context *ctx = (struct proxy_context *)base;
++
++   if (ring_idx >= PROXY_CONTEXT_TIMELINE_COUNT)
++      return -EINVAL;
++
++   /* translate fence_id to the render-server seqno of the pending fence; if
++    * it is no longer pending it has retired -> already signaled
++    */
++   struct proxy_timeline *timeline = &ctx->timelines[ring_idx];
++   bool found = false;
++   uint32_t seqno = 0;
++
++   if (proxy_renderer.flags & VIRGL_RENDERER_ASYNC_FENCE_CB)
++      mtx_lock(&ctx->timeline_mutex);
++
++   list_for_each_entry (struct proxy_fence, fence, &timeline->fences, head) {
++      if (fence->fence_id == fence_id) {
++         seqno = fence->seqno;
++         found = true;
++         break;
++      }
++   }
++
++   if (proxy_renderer.flags & VIRGL_RENDERER_ASYNC_FENCE_CB)
++      mtx_unlock(&ctx->timeline_mutex);
++
++   if (!found)
++      return 1;
++
++   const struct render_context_op_export_fence_request req = {
++      .header.op = RENDER_CONTEXT_OP_EXPORT_FENCE,
++      .ring_index = ring_idx,
++      .seqno = seqno,
++   };
++   if (!proxy_socket_send_request(&ctx->socket, &req, sizeof(req))) {
++      proxy_log("failed to send export_fence");
++      return -ENOTCONN;
++   }
++
++   struct render_context_op_export_fence_reply reply;
++   int reply_fd = -1;
++   int reply_fd_count = 0;
++   if (!proxy_socket_receive_reply_with_fds(&ctx->socket, &reply, sizeof(reply),
++                                            &reply_fd, 1, &reply_fd_count)) {
++      proxy_log("failed to get export_fence reply");
++      return -ENOTCONN;
++   }
++
++   switch (reply.status) {
++   case RENDER_CONTEXT_EXPORT_FENCE_OK:
++      if (!reply_fd_count) {
++         proxy_log("export_fence reply missing fd");
++         return -EINVAL;
++      }
++      *out_fd = reply_fd;
++      return 0;
++   case RENDER_CONTEXT_EXPORT_FENCE_SIGNALED:
++      if (reply_fd_count)
++         close(reply_fd);
++      return 1;
++   default:
++      if (reply_fd_count)
++         close(reply_fd);
++      return -EINVAL;
++   }
++}
++
+ static int
+ proxy_context_submit_fence(struct virgl_context *base,
+                            uint32_t flags,
+@@ -558,6 +631,7 @@ proxy_context_init_base(struct proxy_context *ctx)
+    ctx->base.get_fencing_fd = proxy_context_get_fencing_fd;
+    ctx->base.retire_fences = proxy_context_retire_fences;
+    ctx->base.submit_fence = proxy_context_submit_fence;
++   ctx->base.export_fence = proxy_context_export_fence;
+ }
+ 
+ static bool
+diff --git a/src/venus/vkr_context.c b/src/venus/vkr_context.c
+index 4bf526a..10cc5b4 100644
+--- a/src/venus/vkr_context.c
++++ b/src/venus/vkr_context.c
+@@ -158,6 +158,24 @@ vkr_context_submit_fence(struct vkr_context *ctx,
+    return ok;
+ }
+ 
++int
++vkr_context_export_fence(struct vkr_context *ctx,
++                         uint32_t ring_idx,
++                         uint64_t fence_id,
++                         int *out_fd)
++{
++   /* ring 0 is the cpu timeline: fences retire at submit time */
++   if (ring_idx == 0)
++      return 1;
++
++   if (ring_idx >= ARRAY_SIZE(ctx->sync_queues) || !ctx->sync_queues[ring_idx]) {
++      vkr_log("export_fence: invalid ring_idx %u", ring_idx);
++      return -EINVAL;
++   }
++
++   return vkr_queue_export_fence_sync_file(ctx->sync_queues[ring_idx], fence_id, out_fd);
++}
++
+ bool
+ vkr_context_submit_cmd(struct vkr_context *ctx, const void *buffer, size_t size)
+ {
+diff --git a/src/venus/vkr_context.h b/src/venus/vkr_context.h
+index 12541a7..7ba72eb 100644
+--- a/src/venus/vkr_context.h
++++ b/src/venus/vkr_context.h
+@@ -117,6 +117,13 @@ vkr_context_destroy(struct vkr_context *ctx);
+ bool
+ vkr_context_ring_monitor_init(struct vkr_context *ctx, uint32_t report_period_us);
+ 
++/* see vkr_queue_export_fence_sync_file for return values */
++int
++vkr_context_export_fence(struct vkr_context *ctx,
++                         uint32_t ring_idx,
++                         uint64_t fence_id,
++                         int *out_fd);
++
+ bool
+ vkr_context_submit_fence(struct vkr_context *ctx,
+                          uint32_t flags,
+diff --git a/src/venus/vkr_device_memory.c b/src/venus/vkr_device_memory.c
+index ffe621b..ce52495 100644
+--- a/src/venus/vkr_device_memory.c
++++ b/src/venus/vkr_device_memory.c
+@@ -367,6 +367,17 @@ vkr_dispatch_vkAllocateMemory(struct vn_dispatch_context *dispatch,
+ 
+    struct vkr_device_memory *mem = vkr_device_memory_create_and_add(ctx, args);
+    if (!mem) {
++      if (res_info) {
++         vkr_log("failed to import res %u as %" PRIu64 " bytes of memory type %u: %d",
++                 res_info->resourceId, alloc_info->allocationSize, mem_type_index,
++                 args->ret);
++      } else {
++         /* The client allocates asynchronously and learns of the failure
++          * only when it next uses the memory. */
++         vkr_log("failed to allocate %" PRIu64 " bytes of memory type %u (flags 0x%x%s): %d",
++                 alloc_info->allocationSize, mem_type_index, property_flags,
++                 udmabuf_fd >= 0 ? ", udmabuf" : "", args->ret);
++      }
+       if (local_import_info.fd >= 0)
+          close(local_import_info.fd);
+       if (gbm_bo)
+diff --git a/src/venus/vkr_physical_device.c b/src/venus/vkr_physical_device.c
+index e2c3baa..9cc1aff 100644
+--- a/src/venus/vkr_physical_device.c
++++ b/src/venus/vkr_physical_device.c
+@@ -227,6 +227,33 @@ vkr_physical_device_init_memory_properties(struct vkr_physical_device *physical_
+           VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT);
+    }
+ 
++   /* Host visible memory is allocated exportable so that the client can map
++    * it, but NVIDIA fails to allocate exportable memory from its device
++    * local, host visible (BAR) memory types.  Hide host access to those, so
++    * that clients map system memory types instead, which export.
++    */
++   if (physical_dev->properties.vendorID == 0x10de &&
++       (physical_dev->is_dma_buf_fd_export_supported ||
++        physical_dev->is_opaque_fd_export_supported)) {
++      VkPhysicalDeviceMemoryProperties *mem_props = &physical_dev->memory_properties;
++      const VkMemoryPropertyFlags host_flags = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
++                                               VK_MEMORY_PROPERTY_HOST_COHERENT_BIT |
++                                               VK_MEMORY_PROPERTY_HOST_CACHED_BIT;
++      bool has_system_host_visible = false;
++      for (uint32_t i = 0; i < mem_props->memoryTypeCount; i++) {
++         const VkMemoryPropertyFlags flags = mem_props->memoryTypes[i].propertyFlags;
++         if ((flags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) &&
++             !(flags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT))
++            has_system_host_visible = true;
++      }
++      for (uint32_t i = 0; has_system_host_visible && i < mem_props->memoryTypeCount; i++) {
++         VkMemoryPropertyFlags *flags = &mem_props->memoryTypes[i].propertyFlags;
++         if ((*flags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) &&
++             (*flags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT))
++            *flags &= ~host_flags;
++      }
++   }
++
+    /* fallback to gbm allocation with dma-buf import */
+    if (!physical_dev->is_dma_buf_fd_export_supported &&
+        !physical_dev->is_opaque_fd_export_supported &&
+@@ -686,6 +713,9 @@ vkr_dispatch_vkGetPhysicalDeviceMemoryProperties2(
+       vn_replace_vkGetPhysicalDeviceMemoryProperties2_args_handle(args);
+       vk->GetPhysicalDeviceMemoryProperties2(args->physicalDevice,
+                                              args->pMemoryProperties);
++      /* the memory types as vkr_physical_device_init_memory_properties
++       * adjusted them */
++      args->pMemoryProperties->memoryProperties = physical_dev->memory_properties;
+    }
+ }
+ 
+diff --git a/src/venus/vkr_queue.c b/src/venus/vkr_queue.c
+index 61b94be..bc556a5 100644
+--- a/src/venus/vkr_queue.c
++++ b/src/venus/vkr_queue.c
+@@ -5,6 +5,8 @@
+ 
+ #include "vkr_queue.h"
+ 
++#include <poll.h>
++
+ #include "venus-protocol/vn_protocol_renderer_queue.h"
+ 
+ #include "vkr_context.h"
+@@ -52,6 +54,8 @@ vkr_device_alloc_queue_sync(struct vkr_device *dev,
+    }
+ 
+    sync->device_lost = false;
++   sync->exported = false;
++   sync->sync_fd = -1;
+    sync->flags = fence_flags;
+    sync->ring_idx = ring_idx;
+    sync->fence_id = fence_id;
+@@ -62,6 +66,11 @@ vkr_device_alloc_queue_sync(struct vkr_device *dev,
+ static void
+ vkr_device_free_queue_sync(struct vkr_device *dev, struct vkr_queue_sync *sync)
+ {
++   if (sync->sync_fd >= 0) {
++      close(sync->sync_fd);
++      sync->sync_fd = -1;
++   }
++
+    mtx_lock(&dev->free_sync_mutex);
+    list_addtail(&sync->head, &dev->free_syncs);
+    mtx_unlock(&dev->free_sync_mutex);
+@@ -101,6 +110,14 @@ vkr_queue_sync_submit(struct vkr_queue *queue,
+       vkr_device_free_queue_sync(dev, sync);
+       vkr_log("sync submit failed (vk ret %d) for fence_id %" PRIu64, result, fence_id);
+       return false;
++   } else if (dev->physical_device->KHR_external_fence_fd) {
++      const VkFenceGetFdInfoKHR info = {
++         .sType = VK_STRUCTURE_TYPE_FENCE_GET_FD_INFO_KHR,
++         .fence = sync->fence,
++         .handleType = VK_EXTERNAL_FENCE_HANDLE_TYPE_SYNC_FD_BIT,
++      };
++      sync->exported = vk->GetFenceFdKHR(dev->base.handle.device, &info, &sync->sync_fd) ==
++                       VK_SUCCESS;
+    }
+ 
+    mtx_lock(&queue->sync_thread.mutex);
+@@ -111,6 +128,32 @@ vkr_queue_sync_submit(struct vkr_queue *queue,
+    return true;
+ }
+ 
++
++int
++vkr_queue_export_fence_sync_file(struct vkr_queue *queue, uint64_t fence_id, int *out_fd)
++{
++   TRACE_FUNC();
++   int ret = 1;
++   mtx_lock(&queue->sync_thread.mutex);
++   list_for_each_entry (struct vkr_queue_sync, sync, &queue->sync_thread.syncs, head) {
++      if (sync->fence_id != fence_id)
++         continue;
++
++      if (sync->device_lost) {
++         ret = -ENODEV;
++      } else if (!sync->exported) {
++         ret = -ENOTSUP;
++      } else if (sync->sync_fd >= 0) {
++         *out_fd = os_dupfd_cloexec(sync->sync_fd);
++         ret = *out_fd >= 0 ? 0 : -errno;
++      }
++      break;
++   }
++   mtx_unlock(&queue->sync_thread.mutex);
++
++   return ret;
++}
++
+ static void
+ vkr_queue_sync_thread_fini(struct vkr_queue *queue)
+ {
+@@ -176,6 +219,23 @@ vkr_queue_thread(void *arg)
+       VkResult result;
+       if (sync->device_lost) {
+          result = VK_ERROR_DEVICE_LOST;
++      } else if (sync->exported) {
++         /* NVIDIA waits on exportable fences by sleeping in 10 ms steps; the
++          * sync_file wakes up when the GPU signals it.
++          */
++         result = VK_SUCCESS;
++         if (sync->sync_fd >= 0) {
++            struct pollfd pfd = { .fd = sync->sync_fd, .events = POLLIN };
++            int ret;
++            do {
++               ret = poll(&pfd, 1, 3000);
++            } while (ret < 0 && (errno == EINTR || errno == EAGAIN));
++            if (ret == 0)
++               result = VK_TIMEOUT;
++            else if (ret < 0)
++               result = vk->WaitForFences(dev->base.handle.device, 1, &sync->fence, true,
++                                          ns_per_sec * 3);
++         }
+       } else {
+          result = vk->WaitForFences(dev->base.handle.device, 1, &sync->fence, true,
+                                     ns_per_sec * 3);
+@@ -187,6 +247,10 @@ vkr_queue_thread(void *arg)
+          continue;
+ 
+       list_del(&sync->head);
++      if (sync->sync_fd >= 0) {
++         close(sync->sync_fd);
++         sync->sync_fd = -1;
++      }
+ 
+       vkr_queue_sync_retire(queue, sync);
+    }
+diff --git a/src/venus/vkr_queue.h b/src/venus/vkr_queue.h
+index 6a3a909..bec5c41 100644
+--- a/src/venus/vkr_queue.h
++++ b/src/venus/vkr_queue.h
+@@ -11,6 +11,12 @@
+ struct vkr_queue_sync {
+    VkFence fence;
+    bool device_lost;
++   /* With KHR_external_fence_fd the fence is exported once at submit: a sync_file the
++    * sync thread polls and export requests dup, or -1 when the fence had already
++    * signaled. Closed under sync_thread.mutex.
++    */
++   bool exported;
++   int sync_fd;
+ 
+    uint32_t flags;
+    uint32_t ring_idx;
+@@ -89,6 +95,12 @@ vkr_queue_create(struct vkr_context *ctx,
+ void
+ vkr_queue_destroy(struct vkr_context *ctx, struct vkr_queue *queue);
+ 
++/* returns 0 (fd exported), 1 (already retired/signaled; *out_fd unset), or
++ * negative errno
++ */
++int
++vkr_queue_export_fence_sync_file(struct vkr_queue *queue, uint64_t fence_id, int *out_fd);
++
+ bool
+ vkr_queue_sync_submit(struct vkr_queue *queue,
+                       uint32_t flags,
+diff --git a/src/venus/vkr_renderer.c b/src/venus/vkr_renderer.c
+index c43a96e..d0fc65e 100644
+--- a/src/venus/vkr_renderer.c
++++ b/src/venus/vkr_renderer.c
+@@ -153,6 +153,18 @@ vkr_renderer_submit_cmd(uint32_t ctx_id, void *cmd, uint32_t size)
+    return vkr_context_submit_cmd(ctx, cmd, size);
+ }
+ 
++int
++vkr_renderer_export_fence(uint32_t ctx_id, uint32_t ring_idx, uint64_t fence_id, int *out_fd)
++{
++   TRACE_FUNC();
++
++   struct vkr_context *ctx = vkr_renderer_lookup_context(ctx_id);
++   if (!ctx)
++      return -EINVAL;
++
++   return vkr_context_export_fence(ctx, ring_idx, fence_id, out_fd);
++}
++
+ bool
+ vkr_renderer_submit_fence(uint32_t ctx_id,
+                           uint32_t flags,
+diff --git a/src/venus/vkr_renderer.h b/src/venus/vkr_renderer.h
+index be3ae04..b606ce6 100644
+--- a/src/venus/vkr_renderer.h
++++ b/src/venus/vkr_renderer.h
+@@ -47,6 +47,10 @@ vkr_renderer_destroy_context(uint32_t ctx_id);
+ bool
+ vkr_renderer_submit_cmd(uint32_t ctx_id, void *cmd, uint32_t size);
+ 
++/* returns 0 (fd exported), 1 (already signaled), negative errno on error */
++int
++vkr_renderer_export_fence(uint32_t ctx_id, uint32_t ring_idx, uint64_t fence_id, int *out_fd);
++
+ bool
+ vkr_renderer_submit_fence(uint32_t ctx_id,
+                           uint32_t flags,
+diff --git a/src/virgl_context.h b/src/virgl_context.h
+index 25bc106..5db5cc3 100644
+--- a/src/virgl_context.h
++++ b/src/virgl_context.h
+@@ -129,6 +129,17 @@ struct virgl_context {
+                        uint32_t ring_idx,
+                        uint64_t fence_id);
+ 
++   /* Export a sync_file fd for a fence previously submitted with
++    * submit_fence that has not yet been retired.
++    *
++    * Returns 0 and sets *out_fd on success, 1 if the fence already retired
++    * (treat as an already-signaled sync_file), or negative errno.  Optional.
++    */
++   int (*export_fence)(struct virgl_context *ctx,
++                       uint32_t ring_idx,
++                       uint64_t fence_id,
++                       int *out_fd);
++
+    /* For DRM native contexts, return the device fd: */
+    int (*get_device_fd)(struct virgl_context *ctx);
+ 
+diff --git a/src/virglrenderer.c b/src/virglrenderer.c
+index 79717fc..c35712b 100644
+--- a/src/virglrenderer.c
++++ b/src/virglrenderer.c
+@@ -435,6 +435,20 @@ int virgl_renderer_context_create_fence(uint32_t ctx_id,
+    return ctx->submit_fence(ctx, flags, ring_idx, fence_id);
+ }
+ 
++int virgl_renderer_context_export_fence(uint32_t ctx_id,
++                                        uint32_t ring_idx,
++                                        uint64_t fence_id,
++                                        int *fd)
++{
++   TRACE_FUNC();
++   struct virgl_context *ctx = virgl_context_lookup(ctx_id);
++   if (!ctx)
++      return -EINVAL;
++   if (!ctx->export_fence)
++      return -ENOTSUP;
++   return ctx->export_fence(ctx, ring_idx, fence_id, fd);
++}
++
+ void virgl_renderer_context_poll(uint32_t ctx_id)
+ {
+    TRACE_FUNC();
+diff --git a/src/virglrenderer.h b/src/virglrenderer.h
+index 0bcafef..f59dd9a 100644
+--- a/src/virglrenderer.h
++++ b/src/virglrenderer.h
+@@ -457,6 +457,16 @@ VIRGL_EXPORT int virgl_renderer_context_create_fence(uint32_t ctx_id,
+                                                      uint32_t ring_idx,
+                                                      uint64_t fence_id);
+ 
++/*
++ * Export a sync_file fd for a pending fence of a context (venus contexts
++ * only).  Returns 0 and sets *fd on success, 1 if the fence already
++ * signaled/retired (no fd; treat as signaled), negative on error.
++ */
++VIRGL_EXPORT int virgl_renderer_context_export_fence(uint32_t ctx_id,
++                                                     uint32_t ring_idx,
++                                                     uint64_t fence_id,
++                                                     int *fd);
++
+ VIRGL_EXPORT void virgl_renderer_context_poll(uint32_t ctx_id); /* force fences */
+ VIRGL_EXPORT int virgl_renderer_context_get_poll_fd(uint32_t ctx_id);
+ 
+diff --git a/vtest/vtest.h b/vtest/vtest.h
+index b2708a2..fb79a8f 100644
+--- a/vtest/vtest.h
++++ b/vtest/vtest.h
+@@ -94,6 +94,7 @@ int vtest_sync_unref(uint32_t length_dw);
+ int vtest_sync_read(uint32_t length_dw);
+ int vtest_sync_write(uint32_t length_dw);
+ int vtest_sync_wait(uint32_t length_dw);
++int vtest_sync_export_sync_file(uint32_t length_dw);
+ 
+ int vtest_submit_cmd2(uint32_t length_dw);
+ 
+@@ -112,6 +113,7 @@ int vtest_drm_sync_timeline_wait(uint32_t length_dw);
+ int vtest_drm_sync_query(uint32_t length_dw);
+ int vtest_drm_sync_transfer(uint32_t length_dw);
+ int vtest_resource_export_fd(uint32_t length_dw);
++int vtest_resource_import_fd(uint32_t length_dw);
+ 
+ void vtest_set_max_length(uint32_t length);
+ 
+diff --git a/vtest/vtest_protocol.h b/vtest/vtest_protocol.h
+index 1bd515c..caebb02 100644
+--- a/vtest/vtest_protocol.h
++++ b/vtest/vtest_protocol.h
+@@ -27,7 +27,7 @@
+ 
+ #define VTEST_DEFAULT_SOCKET_NAME "/tmp/.virgl_test"
+ 
+-#define VTEST_PROTOCOL_VERSION 4
++#define VTEST_PROTOCOL_VERSION 5
+ 
+ /* 32-bit length field */
+ /* 32-bit cmd field */
+@@ -94,6 +94,12 @@
+ #define VCMD_DRM_SYNC_TRANSFER 37
+ #define VCMD_RESOURCE_EXPORT_FD 38
+ 
++/* since protocol version 5 */
++#define VCMD_RESOURCE_IMPORT_FD 39
++
++/* export a sync_file fd for a pending venus sync point; see VCMD_PARAM_HAS_VENUS_SYNC_FD */
++#define VCMD_SYNC_EXPORT_SYNC_FILE 40
++
+ #define VCMD_RES_CREATE_SIZE 10
+ #define VCMD_RES_CREATE_RES_HANDLE 0 /* must be 0 since protocol version 3 */
+ #define VCMD_RES_CREATE_TARGET 1
+@@ -163,6 +169,8 @@
+ enum vcmd_param  {
+    VCMD_PARAM_MAX_TIMELINE_COUNT = 1,
+    VCMD_PARAM_HAS_TIMELINE_SYNCOBJ = 2,
++   /* server supports VCMD_SYNC_EXPORT_SYNC_FILE for venus sync points */
++   VCMD_PARAM_HAS_VENUS_SYNC_FD = 3,
+ };
+ #define VCMD_GET_PARAM_SIZE 1
+ #define VCMD_GET_PARAM_PARAM 0
+@@ -225,6 +233,26 @@ enum vcmd_sync_wait_flag {
+ #define VCMD_SYNC_WAIT_VALUE_HI(n) (2 + 3 * (n) + 2)
+ /* resp poll'able fd */
+ 
++/* Export a sync_file fd tied to the GPU work that signals a venus sync
++ * point.  Requires VCMD_PARAM_HAS_VENUS_SYNC_FD.
++ *
++ * The response carries a status dword; when status is
++ * VCMD_SYNC_EXPORT_SYNC_FILE_OK it is followed by 1 fd (a real kernel
++ * sync_file usable by the client directly when client and server share the
++ * kernel).  VCMD_SYNC_EXPORT_SYNC_FILE_SIGNALED means the sync point already
++ * retired (treat as an already-signaled fence; no fd follows).
++ */
++enum vcmd_sync_export_sync_file_status {
++   VCMD_SYNC_EXPORT_SYNC_FILE_OK = 0,
++   VCMD_SYNC_EXPORT_SYNC_FILE_SIGNALED = 1,
++   VCMD_SYNC_EXPORT_SYNC_FILE_ERROR = 2,
++};
++#define VCMD_SYNC_EXPORT_SYNC_FILE_SIZE 3
++#define VCMD_SYNC_EXPORT_SYNC_FILE_ID 0
++#define VCMD_SYNC_EXPORT_SYNC_FILE_VALUE_LO 1
++#define VCMD_SYNC_EXPORT_SYNC_FILE_VALUE_HI 2
++/* resp status dword, then 1 fd if status == OK */
++
+ enum vcmd_submit_cmd2_flag {
+    VCMD_SUBMIT_CMD2_FLAG_RING_IDX = 1 << 0,
+    VCMD_SUBMIT_CMD2_FLAG_IN_FENCE_FD = 1 << 1,
+@@ -349,4 +377,13 @@ struct vcmd_submit_cmd2_batch {
+ #define VCMD_RESOURCE_EXPORT_FD_RES_HANDLE 0
+ /* rsp fd */
+ 
++/* The command is followed by a dma-buf or memfd sent with SCM_RIGHTS.  A
++ * memfd is wrapped in a udmabuf, padded to at least SIZE.  SIZE may be 0 to
++ * use the size of the fd.
++ */
++#define VCMD_RESOURCE_IMPORT_FD_SIZE 2
++#define VCMD_RESOURCE_IMPORT_FD_SIZE_LO 0
++#define VCMD_RESOURCE_IMPORT_FD_SIZE_HI 1
++/* resp res_id */
++
+ #endif /* VTEST_PROTOCOL */
+diff --git a/vtest/vtest_renderer.c b/vtest/vtest_renderer.c
+index ba4feb1..c8ef459 100644
+--- a/vtest/vtest_renderer.c
++++ b/vtest/vtest_renderer.c
+@@ -44,6 +44,11 @@
+ #include <sys/uio.h>
+ #include <sys/socket.h>
+ #include <sys/mman.h>
++#include <sys/ioctl.h>
++#include <sys/stat.h>
++#include <sys/vfs.h>
++#include <linux/magic.h>
++#include <linux/udmabuf.h>
+ #ifdef HAVE_EVENTFD_H
+ #include <sys/eventfd.h>
+ #endif
+@@ -966,6 +971,10 @@ int vtest_get_param(UNUSED uint32_t length_dw)
+          resp[1] = VTEST_MAX_TIMELINE_COUNT;
+ #endif
+       break;
++   case VCMD_PARAM_HAS_VENUS_SYNC_FD:
++      resp[0] = true;
++      resp[1] = !!(renderer.ctx_flags & VIRGL_RENDERER_VENUS);
++      break;
+    case VCMD_PARAM_HAS_TIMELINE_SYNCOBJ: {
+ #ifdef ENABLE_DRM
+       int fd = virgl_renderer_get_dev_fd(ctx->ctx_id);
+@@ -2409,6 +2418,75 @@ out:
+    return ret;
+ }
+ 
++int vtest_sync_export_sync_file(uint32_t length_dw)
++{
++   struct vtest_context *ctx = vtest_get_current_context();
++   uint32_t export_buf[VCMD_SYNC_EXPORT_SYNC_FILE_SIZE];
++   uint32_t resp_buf[VTEST_HDR_SIZE + 1];
++   uint32_t status = VCMD_SYNC_EXPORT_SYNC_FILE_ERROR;
++   struct vtest_sync *sync;
++   int fd = -1;
++   int ret;
++
++   if (length_dw != VCMD_SYNC_EXPORT_SYNC_FILE_SIZE)
++      return -EINVAL;
++
++   ret = ctx->input->read(ctx->input, export_buf, sizeof(export_buf));
++   if (ret != sizeof(export_buf))
++      return -1;
++
++   const uint32_t sync_id = export_buf[VCMD_SYNC_EXPORT_SYNC_FILE_ID];
++   const uint64_t value = export_buf[VCMD_SYNC_EXPORT_SYNC_FILE_VALUE_LO] |
++                          (uint64_t)export_buf[VCMD_SYNC_EXPORT_SYNC_FILE_VALUE_HI] << 32;
++
++   sync = util_hash_table_get(ctx->sync_table, intptr_to_pointer(sync_id));
++   if (sync) {
++      /* find the newest pending timeline submit that will signal this sync
++       * to at least the requested value; if there is none, the sync point
++       * has already retired
++       */
++      struct vtest_timeline_submit *found = NULL;
++      uint32_t found_ring = 0;
++
++      for (uint32_t ring = 0; ring < VTEST_MAX_TIMELINE_COUNT; ring++) {
++         struct vtest_timeline *timeline = &ctx->timelines[ring];
++         list_for_each_entry (struct vtest_timeline_submit, submit,
++                              &timeline->submits, head) {
++            for (uint32_t j = 0; j < submit->count; j++) {
++               if (submit->syncs[j] == sync && submit->values[j] >= value) {
++                  found = submit;
++                  found_ring = ring;
++                  break;
++               }
++            }
++         }
++      }
++
++      if (found) {
++         ret = virgl_renderer_context_export_fence(ctx->ctx_id, found_ring,
++                                                   (uintptr_t)found, &fd);
++         if (ret == 0 && fd >= 0)
++            status = VCMD_SYNC_EXPORT_SYNC_FILE_OK;
++         else if (ret == 1)
++            status = VCMD_SYNC_EXPORT_SYNC_FILE_SIGNALED;
++      } else {
++         status = VCMD_SYNC_EXPORT_SYNC_FILE_SIGNALED;
++      }
++   }
++
++   resp_buf[VTEST_CMD_LEN] = 1;
++   resp_buf[VTEST_CMD_ID] = VCMD_SYNC_EXPORT_SYNC_FILE;
++   resp_buf[VTEST_CMD_DATA_START] = status;
++   ret = vtest_block_write(ctx->out_fd, resp_buf, sizeof(resp_buf));
++   if (ret >= 0 && status == VCMD_SYNC_EXPORT_SYNC_FILE_OK)
++      ret = vtest_send_fd(ctx->out_fd, fd);
++
++   if (fd >= 0)
++      close(fd);
++
++   return ret >= 0 ? 0 : ret;
++}
++
+ int vtest_submit_cmd2(uint32_t length_dw)
+ {
+    struct vtest_context *ctx = vtest_get_current_context();
+@@ -3053,6 +3131,189 @@ out:
+    return ret;
+ }
+ 
++static int vtest_udmabuf_fd = -1;
++
++static int vtest_create_padding_memfd(uint64_t size)
++{
++   const int fd = memfd_create("vtest-padding", MFD_CLOEXEC | MFD_ALLOW_SEALING);
++   if (fd < 0)
++      return -errno;
++
++   if (ftruncate(fd, size) || fcntl(fd, F_ADD_SEALS, F_SEAL_SHRINK)) {
++      const int ret = -errno;
++      close(fd);
++      return ret;
++   }
++
++   return fd;
++}
++
++/* Gralloc implementations without a GPU allocate buffers from memfd.  Host
++ * GPU drivers import dma-bufs rather than memfds, so wrap the memfd in a
++ * udmabuf.  The driver can require an allocation larger than the client
++ * buffer, and Android seals its memfds against growing, so padding pages
++ * from a second memfd are appended instead.
++ */
++static int vtest_memfd_to_dmabuf(int memfd, uint64_t size)
++{
++   const uint64_t page_size = getpagesize();
++
++   struct stat st;
++   if (fstat(memfd, &st))
++      return report_failure("fstat on memfd failed", -errno);
++
++   const uint64_t memfd_size = st.st_size;
++   if (!memfd_size || memfd_size % page_size)
++      return report_failure("memfd size is not page aligned", -EINVAL);
++
++   /* Drivers pad allocations by far less than this.  The limit keeps an
++    * untrusted client from making the server allocate padding memory.
++    */
++   const uint64_t max_padding = memfd_size / 4 + (2u << 20);
++   if (size > memfd_size && size - memfd_size > max_padding)
++      return report_failure("requested size exceeds the memfd size", -EINVAL);
++
++   const int seals = fcntl(memfd, F_GET_SEALS);
++   if (!(seals & F_SEAL_SHRINK) && fcntl(memfd, F_ADD_SEALS, F_SEAL_SHRINK))
++      return report_failure("failed to seal memfd", -errno);
++
++   if (vtest_udmabuf_fd < 0) {
++      vtest_udmabuf_fd = open("/dev/udmabuf", O_RDWR | O_CLOEXEC);
++      if (vtest_udmabuf_fd < 0)
++         return report_failure("failed to open /dev/udmabuf", -errno);
++   }
++
++   uint64_t list_storage[(sizeof(struct udmabuf_create_list) +
++                          2 * sizeof(struct udmabuf_create_item)) /
++                         sizeof(uint64_t) + 1] = { 0 };
++   struct udmabuf_create_list *list = (struct udmabuf_create_list *)list_storage;
++   list->flags = UDMABUF_FLAGS_CLOEXEC;
++   list->count = 1;
++   list->list[0] = (struct udmabuf_create_item){
++      .memfd = memfd,
++      .offset = 0,
++      .size = memfd_size,
++   };
++
++   int padding_fd = -1;
++   const uint64_t padding_size = align64(size, page_size) > memfd_size
++                                    ? align64(size, page_size) - memfd_size
++                                    : 0;
++   if (padding_size) {
++      padding_fd = vtest_create_padding_memfd(padding_size);
++      if (padding_fd < 0)
++         return report_failure("failed to create padding memfd", padding_fd);
++
++      list->list[1] = (struct udmabuf_create_item){
++         .memfd = padding_fd,
++         .offset = 0,
++         .size = padding_size,
++      };
++      list->count = 2;
++   }
++
++   /* the udmabuf keeps the pages of both memfds */
++   const int fd = ioctl(vtest_udmabuf_fd, UDMABUF_CREATE_LIST, list);
++   const int ret = fd < 0 ? -errno : 0;
++   if (padding_fd >= 0)
++      close(padding_fd);
++   if (fd < 0)
++      return report_failure("UDMABUF_CREATE_LIST failed", ret);
++
++   return fd;
++}
++
++static uint32_t vtest_import_fd(struct vtest_context *ctx, int fd, uint64_t size)
++{
++   /* F_GET_SEALS only succeeds on memfds */
++   if (fcntl(fd, F_GET_SEALS) >= 0) {
++      const int dmabuf_fd = vtest_memfd_to_dmabuf(fd, size);
++      close(fd);
++      if (dmabuf_fd < 0)
++         return 0;
++      fd = dmabuf_fd;
++   } else {
++      struct statfs fs;
++      if (fstatfs(fd, &fs) || fs.f_type != DMA_BUF_MAGIC) {
++         close(fd);
++         report_failure("imported fd is neither a memfd nor a dma-buf", -EINVAL);
++         return 0;
++      }
++   }
++
++   /* fstat rather than lseek: a received fd shares its offset with the
++    * client's fd
++    */
++   struct stat st;
++   if (fstat(fd, &st) || st.st_size <= 0 || size > (uint64_t)st.st_size) {
++      close(fd);
++      report_failure("invalid dma-buf size", -EINVAL);
++      return 0;
++   }
++   if (!size)
++      size = st.st_size;
++
++   struct vtest_resource *res = vtest_new_resource(0);
++   if (!res) {
++      close(fd);
++      return 0;
++   }
++
++   const struct virgl_renderer_resource_import_blob_args args = {
++      .res_handle = res->res_id,
++      .blob_mem = VIRGL_RENDERER_BLOB_MEM_HOST3D,
++      .fd_type = VIRGL_RENDERER_BLOB_FD_TYPE_DMABUF,
++      .fd = fd,
++      .size = size,
++   };
++   /* takes ownership of fd, even on failure */
++   const int ret = virgl_renderer_resource_import_blob(&args);
++   if (ret) {
++      vtest_unref_resource(res);
++      report_failed_call("virgl_renderer_resource_import_blob", ret);
++      return 0;
++   }
++
++   virgl_renderer_ctx_attach_resource(ctx->ctx_id, res->res_id);
++   util_hash_table_set(ctx->resource_table, intptr_to_pointer(res->res_id), res);
++
++   return res->res_id;
++}
++
++int vtest_resource_import_fd(uint32_t length_dw)
++{
++   struct vtest_context *ctx = vtest_get_current_context();
++   uint32_t vcmd_resource_import_fd[VCMD_RESOURCE_IMPORT_FD_SIZE];
++   uint32_t resp_buf[VTEST_HDR_SIZE + 1];
++   int ret;
++
++   if (ctx->protocol_version < 5)
++      return report_failed_call("protocol version too low", -EINVAL);
++   if (length_dw != VCMD_RESOURCE_IMPORT_FD_SIZE)
++      return report_failed_call("invalid command length", -EINVAL);
++
++   ret = ctx->input->read(ctx->input, &vcmd_resource_import_fd,
++                          sizeof(vcmd_resource_import_fd));
++   if (ret != sizeof(vcmd_resource_import_fd))
++      return -1;
++
++   const uint64_t size =
++      vcmd_resource_import_fd[VCMD_RESOURCE_IMPORT_FD_SIZE_LO] |
++      (uint64_t)vcmd_resource_import_fd[VCMD_RESOURCE_IMPORT_FD_SIZE_HI] << 32;
++
++   const int fd = vtest_receive_fd(ctx->input->data.fd);
++   if (fd < 0)
++      return fd;
++
++   /* a failed import replies with res_id 0 so that the client can recover */
++   resp_buf[VTEST_CMD_LEN] = 1;
++   resp_buf[VTEST_CMD_ID] = VCMD_RESOURCE_IMPORT_FD;
++   resp_buf[VTEST_CMD_DATA_START] = vtest_import_fd(ctx, fd, size);
++
++   ret = vtest_block_write(ctx->out_fd, resp_buf, sizeof(resp_buf));
++   return ret < 0 ? ret : 0;
++}
++
+ void vtest_set_max_length(uint32_t length)
+ {
+    renderer.max_length = length;
+diff --git a/vtest/vtest_server.c b/vtest/vtest_server.c
+index 64a29e1..6298a54 100644
+--- a/vtest/vtest_server.c
++++ b/vtest/vtest_server.c
+@@ -730,6 +730,12 @@ static const struct vtest_command {
+    HANDLER(DRM_SYNC_TRANSFER,           drm_sync_transfer,         true   ),
+ #endif /* ENABLE_DRM */
+    HANDLER(RESOURCE_EXPORT_FD,          resource_export_fd,        true   ),
++
++   /* since protocol version 5 */
++   HANDLER(RESOURCE_IMPORT_FD,          resource_import_fd,        true   ),
++
++   /* when VCMD_PARAM_HAS_VENUS_SYNC_FD */
++   HANDLER(SYNC_EXPORT_SYNC_FILE,       sync_export_sync_file,     true   ),
+ };
+ 
+ static int vtest_client_dispatch_commands(struct vtest_client *client)
