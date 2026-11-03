@@ -36,7 +36,7 @@ index 1bd515c..70ac8e8 100644
 +
  #endif /* VTEST_PROTOCOL */
 diff --git a/src/virtio/vulkan/vn_android.c b/src/virtio/vulkan/vn_android.c
-index 52ed522..85030fc 100644
+index 52ed522..45b30a9 100644
 --- a/src/virtio/vulkan/vn_android.c
 +++ b/src/virtio/vulkan/vn_android.c
 @@ -11,16 +11,21 @@
@@ -176,9 +176,9 @@ index 52ed522..85030fc 100644
 +static bool
 +vn_android_anb_needs_shadow(const VkImageCreateInfo *create_info)
 +{
++   struct u_gralloc *gralloc = vk_android_get_ugralloc();
 +   return (create_info->usage & VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT) &&
-+          u_gralloc_get_type(vk_android_get_ugralloc()) ==
-+             U_GRALLOC_TYPE_FALLBACK;
++          gralloc && u_gralloc_get_type(gralloc) == U_GRALLOC_TYPE_FALLBACK;
 +}
 +
 +static VkResult
@@ -268,7 +268,7 @@ index 52ed522..85030fc 100644
     if (result != VK_SUCCESS)
        return result;
  
-@@ -374,10 +483,206 @@ vn_android_image_from_anb(struct vn_device *dev,
+@@ -374,10 +483,216 @@ vn_android_image_from_anb(struct vn_device *dev,
        return result;
     }
  
@@ -320,29 +320,28 @@ index 52ed522..85030fc 100644
 +      .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
 +      .queueFamilyIndex = queue_family,
 +   };
-+   result = disp->CreateCommandPool(dev_handle, &pool_info, NULL,
-+                                    &img->wsi.shadow_pool);
++   VkCommandPool pool;
++   result = disp->CreateCommandPool(dev_handle, &pool_info, NULL, &pool);
 +   if (result != VK_SUCCESS)
 +      return result;
 +
 +   const VkCommandBufferAllocateInfo cmd_info = {
 +      .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
-+      .commandPool = img->wsi.shadow_pool,
++      .commandPool = pool,
 +      .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
 +      .commandBufferCount = 1,
 +   };
-+   result =
-+      disp->AllocateCommandBuffers(dev_handle, &cmd_info, &img->wsi.shadow_cmd);
++   VkCommandBuffer cmd;
++   result = disp->AllocateCommandBuffers(dev_handle, &cmd_info, &cmd);
 +   if (result != VK_SUCCESS)
-+      return result;
++      goto fail;
 +
-+   VkCommandBuffer cmd = img->wsi.shadow_cmd;
 +   const VkCommandBufferBeginInfo begin_info = {
 +      .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
 +   };
 +   result = disp->BeginCommandBuffer(cmd, &begin_info);
 +   if (result != VK_SUCCESS)
-+      return result;
++      goto fail;
 +
 +   const VkImageSubresourceRange range = {
 +      .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
@@ -386,6 +385,9 @@ index 52ed522..85030fc 100644
 +                      vn_image_to_handle(img->wsi.anb_linear),
 +                      VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
 +
++   /* concurrent images take no queue family ownership transfers */
++   const bool concurrent = img->wsi.anb_linear->base.vk.sharing_mode ==
++                           VK_SHARING_MODE_CONCURRENT;
 +   const VkImageMemoryBarrier after_copy[2] = {
 +      {
 +         .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
@@ -402,8 +404,9 @@ index 52ed522..85030fc 100644
 +         .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
 +         .oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
 +         .newLayout = VK_IMAGE_LAYOUT_GENERAL,
-+         .srcQueueFamilyIndex = queue_family,
-+         .dstQueueFamilyIndex = VK_QUEUE_FAMILY_FOREIGN_EXT,
++         .srcQueueFamilyIndex = concurrent ? VK_QUEUE_FAMILY_IGNORED : queue_family,
++         .dstQueueFamilyIndex =
++            concurrent ? VK_QUEUE_FAMILY_IGNORED : VK_QUEUE_FAMILY_FOREIGN_EXT,
 +         .image = vn_image_to_handle(img->wsi.anb_linear),
 +         .subresourceRange = range,
 +      },
@@ -414,10 +417,17 @@ index 52ed522..85030fc 100644
 +
 +   result = disp->EndCommandBuffer(cmd);
 +   if (result != VK_SUCCESS)
-+      return result;
++      goto fail;
 +
++   /* only a completely recorded command buffer is ever cached */
++   img->wsi.shadow_pool = pool;
++   img->wsi.shadow_cmd = cmd;
 +   img->wsi.shadow_queue_family = queue_family;
 +   return VK_SUCCESS;
++
++fail:
++   disp->DestroyCommandPool(dev_handle, pool, NULL);
++   return result;
 +}
 +
 +VKAPI_ATTR VkResult VKAPI_CALL
@@ -475,7 +485,7 @@ index 52ed522..85030fc 100644
  struct vn_device_memory *
  vn_android_get_wsi_memory_from_bind_info(
     struct vn_device *dev, const VkBindImageMemoryInfo *bind_info)
-@@ -395,6 +700,41 @@ vn_android_get_wsi_memory_from_bind_info(
+@@ -395,6 +710,41 @@ vn_android_get_wsi_memory_from_bind_info(
     return img->wsi.anb_mem;
  }
  
@@ -517,7 +527,7 @@ index 52ed522..85030fc 100644
  VkResult
  vn_android_device_import_ahb(struct vn_device *dev,
                               struct vn_device_memory *mem,
-@@ -422,9 +762,13 @@ vn_android_device_import_ahb(struct vn_device *dev,
+@@ -422,9 +772,13 @@ vn_android_device_import_ahb(struct vn_device *dev,
        struct vn_image *img = vn_image_from_handle(dedicated_info->image);
  
        /* If ahb is for an image, finish the deferred image creation first */
@@ -532,6 +542,15 @@ index 52ed522..85030fc 100644
        if (result != VK_SUCCESS)
           return result;
  
+@@ -446,7 +800,7 @@ vn_android_device_import_ahb(struct vn_device *dev,
+    if (!mem_reqs.memoryTypeBits)
+       return VK_ERROR_INVALID_EXTERNAL_HANDLE;
+ 
+-   if (!((1 << mem_vk->memory_type_index) & mem_reqs.memoryTypeBits))
++   if (!((1u << mem_vk->memory_type_index) & mem_reqs.memoryTypeBits))
+       mem_vk->memory_type_index = ffs(mem_reqs.memoryTypeBits) - 1;
+ 
+    mem_vk->size = mem_reqs.size;
 diff --git a/src/virtio/vulkan/vn_image.c b/src/virtio/vulkan/vn_image.c
 index b5743aa..91c21fa 100644
 --- a/src/virtio/vulkan/vn_image.c
@@ -606,7 +625,7 @@ index 9756142..92e10d6 100644
     vn_renderer_sync_destroy(dev->renderer, sync);
  
 diff --git a/src/virtio/vulkan/vn_renderer_vtest.c b/src/virtio/vulkan/vn_renderer_vtest.c
-index 5fad0b0..18360e2 100644
+index 5fad0b0..46a83e8 100644
 --- a/src/virtio/vulkan/vn_renderer_vtest.c
 +++ b/src/virtio/vulkan/vn_renderer_vtest.c
 @@ -101,7 +101,8 @@ vtest_read(struct vtest *vtest, void *buf, size_t size)
@@ -687,7 +706,7 @@ index 5fad0b0..18360e2 100644
  static uint32_t
  vtest_vcmd_sync_create(struct vtest *vtest, uint64_t initial_val)
  {
-@@ -778,6 +833,48 @@ vtest_bo_create_from_device_memory(
+@@ -778,6 +833,53 @@ vtest_bo_create_from_device_memory(
     return VK_SUCCESS;
  }
  
@@ -715,7 +734,12 @@ index 5fad0b0..18360e2 100644
 +      return VK_ERROR_INVALID_EXTERNAL_HANDLE;
 +   }
 +
-+   const bool mappable = flags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT;
++   /* the server pads memfds with its own pages, which the client cannot
++    * map, so the client mapping must not reach past the end of the fd
++    */
++   const off_t fd_size = lseek(fd, 0, SEEK_END);
++   const bool mappable = (flags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) &&
++                         fd_size >= 0 && (VkDeviceSize)fd_size >= size;
 +   struct vtest_bo *bo = util_sparse_array_get(&vtest->bo_array, res_id);
 +   *bo = (struct vtest_bo){
 +      .base = {
@@ -736,7 +760,7 @@ index 5fad0b0..18360e2 100644
  static void
  vtest_shmem_destroy_now(struct vn_renderer *renderer,
                          struct vn_renderer_shmem *_shmem)
-@@ -930,7 +1027,7 @@ vtest_init_renderer_info(struct vtest *vtest)
+@@ -930,7 +1032,7 @@ vtest_init_renderer_info(struct vtest *vtest)
     info->pci.vendor_id = VTEST_PCI_VENDOR_ID;
     info->pci.device_id = VTEST_PCI_DEVICE_ID;
  
@@ -745,7 +769,7 @@ index 5fad0b0..18360e2 100644
     info->has_external_sync = false;
     info->has_implicit_fencing = false;
  
-@@ -1070,7 +1167,8 @@ vtest_init(struct vtest *vtest)
+@@ -1070,7 +1172,8 @@ vtest_init(struct vtest *vtest)
  
     vtest->base.bo_ops.create_from_device_memory =
        vtest_bo_create_from_device_memory;
