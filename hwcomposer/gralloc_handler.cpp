@@ -256,7 +256,19 @@ buffer_metadata get_buffer_metadata_cros(display *, hwc_layer_1_t *layer, size_t
     };
 }
 
+// gralloc.default's private_handle_t: one fd, then magic, flags, size, offset, ... A buffer in
+// GPU memory (PRIV_FLAGS_GPU_MEMORY) is a dma-buf with its DRM format modifier at ints 11 and 12.
+constexpr int kGrallocDefaultMagic = 0x3141592;
+constexpr int kGrallocGpuMemory = 0x2;
+
 std::unique_ptr<buffer> create_buffer_generic(display *display, const buffer_metadata& metadata, buffer_handle_t handle) {
+    const int *ints = handle->data + handle->numFds;
+    if (display->dmabuf && handle->numFds >= 1 && handle->numInts >= 13 &&
+        ints[0] == kGrallocDefaultMagic && (ints[1] & kGrallocGpuMemory)) {
+        uint64_t modifier = uint64_t(uint32_t(ints[12])) << 32 | uint32_t(ints[11]);
+        return create_dmabuf_wl_buffer(display, metadata, handle->data[0], -1 /* compute drm format */,
+                                       metadata.pixel_stride * 4, ints[3], modifier, handle);
+    }
     return create_shm_wl_buffer(display, metadata, handle);
 }
 std::unique_ptr<buffer> create_buffer_gbm(display *display, const buffer_metadata& metadata, buffer_handle_t handle) {
