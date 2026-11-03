@@ -285,6 +285,8 @@ bool WaydroidDecoder::connectHost(uint32_t codec) {
     mRgbaTargets = reply.flags & HWDEC_OPEN_RGBA_TARGETS;
     mNv12Unreliable = reply.flags & HWDEC_OPEN_NV12_UNRELIABLE;
     mSdrOutput = readSdrOutput();
+    if (mSdrOutput == SdrOutput::kRgba && !mRgbaTargets)
+        ALOGW("%s=rgba, but the host cannot write RGBA buffers", kSdrOutputProperty);
     return true;
 }
 
@@ -537,14 +539,14 @@ OMX_COLOR_FORMATTYPE WaydroidDecoder::formatFor(const hwdec_reply &frame) const 
     return deep ? OMX_COLOR_FormatYUV420Planar16 : OMX_COLOR_FormatYUV420Planar;
 }
 
-// The format the property asks for, or the next one the host can write
+// The format the property asks for, or the next one the host can write.
+// RGBA falls back to NV12 only where NV12 is reliable.
 OMX_COLOR_FORMATTYPE WaydroidDecoder::nativeFormat() const {
     bool rgba = mSdrOutput == SdrOutput::kRgba ||
                 (mSdrOutput == SdrOutput::kAuto && mNv12Unreliable);
-    if (mSdrOutput != SdrOutput::kSystem) {
-        if (rgba && mRgbaTargets) return kNativeFormatRgba;
-        if (mGpuTargets) return kNativeFormatGpu;
-    }
+    if (mSdrOutput == SdrOutput::kSystem) return kNativeFormat;
+    if (rgba && mRgbaTargets) return kNativeFormatRgba;
+    if (mGpuTargets && !(rgba && mNv12Unreliable)) return kNativeFormatGpu;
     return kNativeFormat;
 }
 
