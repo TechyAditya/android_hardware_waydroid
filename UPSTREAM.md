@@ -1,6 +1,6 @@
 # Upstream pull requests and issues
 
-What this fork plans to send to Waydroid, in plain words. Open so far: [#92](https://github.com/waydroid/android_hardware_waydroid/pull/92), [android_vendor_waydroid#57](https://github.com/waydroid/android_vendor_waydroid/pull/57), [#93](https://github.com/waydroid/android_hardware_waydroid/pull/93) for issue [waydroid#2470](https://github.com/waydroid/waydroid/issues/2470), and [android_vendor_waydroid#58](https://github.com/waydroid/android_vendor_waydroid/pull/58) with [#94](https://github.com/waydroid/android_hardware_waydroid/pull/94) for issue [waydroid#2471](https://github.com/waydroid/waydroid/issues/2471). A reply is posted on [#2464](https://github.com/waydroid/waydroid/issues/2464#issuecomment-6617138955). Nothing else has been posted.
+What this fork plans to send to Waydroid, in plain words. Open so far: [#92](https://github.com/waydroid/android_hardware_waydroid/pull/92), [android_vendor_waydroid#57](https://github.com/waydroid/android_vendor_waydroid/pull/57), [#93](https://github.com/waydroid/android_hardware_waydroid/pull/93) for issue [waydroid#2470](https://github.com/waydroid/waydroid/issues/2470), and [android_vendor_waydroid#58](https://github.com/waydroid/android_vendor_waydroid/pull/58) with [#94](https://github.com/waydroid/android_hardware_waydroid/pull/94) for issue [waydroid#2471](https://github.com/waydroid/waydroid/issues/2471). A reply is posted on [#2464](https://github.com/waydroid/waydroid/issues/2464#issuecomment-6617138955), and the NVIDIA bug report is [forum thread 387942](https://forums.developer.nvidia.com/t/vulkan-some-nv12-dma-bufs-imported-as-two-plane-images-read-back-wrong-615-78-08/387942). Nothing else has been posted.
 
 1. **Smoother window resizing, without the crash.** Dragging a window edge made Android rebuild its screen about 150 times in 8 seconds, and Android's graphics crashed during the rebuilds ([#2464](https://github.com/waydroid/waydroid/issues/2464)). [#92](https://github.com/waydroid/android_hardware_waydroid/pull/92) cuts the rebuilds to about 15 and stretches the old frame meanwhile. It is open. [android_vendor_waydroid#57](https://github.com/waydroid/android_vendor_waydroid/pull/57), also open, adds the missing null check that SurfaceFlinger crashed on. After both are merged, ask the reporter to confirm that the SurfaceFlinger crash and the composer deaths are both gone, then close #2464. [Drafts](#1-resizing-and-the-surfaceflinger-crash)
 2. **No more black flashes in the full Waydroid window.** The window was shown before Android finished drawing it. One PR. [Draft](#2-black-flashes-in-the-full-ui)
@@ -8,7 +8,7 @@ What this fork plans to send to Waydroid, in plain words. Open so far: [#92](htt
 4. **Video shows in its own colours.** Ordinary (SDR) video no longer looks washed out, because Android stops brightening its dark parts; stock Waydroid does this too. HDR video shows as HDR when the compositor runs the monitor in HDR mode. Open as issue [waydroid#2471](https://github.com/waydroid/waydroid/issues/2471), with PRs [android_vendor_waydroid#58](https://github.com/waydroid/android_vendor_waydroid/pull/58) and [#94](https://github.com/waydroid/android_hardware_waydroid/pull/94). [Drafts](#4-video-colours)
 5. **No audio crackles at high sample rates.** A comment on [#91](https://github.com/waydroid/android_hardware_waydroid/pull/91), someone else's open audio PR, which already has half of the fix. [Draft](#5-audio-at-high-sample-rates)
 6. **Video buffers in GPU memory go straight to the compositor.** On hold: upstream has nothing that creates those buffers yet. [Note](#6-gpu-memory-buffers-as-dma-bufs)
-7. **Bug report to NVIDIA.** Their driver misreads some video buffers, which shows as green or colourless frames. Ready, with a small program that shows the bug. [Draft](#7-nvidia-misreads-two-plane-nv12-imports)
+7. **Bug report to NVIDIA.** Their driver misreads some video buffers, which shows as green or colourless frames. Posted as [forum thread 387942](https://forums.developer.nvidia.com/t/vulkan-some-nv12-dma-bufs-imported-as-two-plane-images-read-back-wrong-615-78-08/387942), with a small program that shows the bug. [Draft](#7-nvidia-misreads-two-plane-nv12-imports)
 Every head branch below starts from upstream `lineage-20` and is on `TechyAditya/android_hardware_waydroid` unless it says otherwise. Each one compiles alone with `stack/build.sh`. The changes ran together in the `all-fixes` build, not branch by branch. To open a pull request from a draft, save the body to a file and run:
 
 ```sh
@@ -313,7 +313,7 @@ On hold. `pr/gpu-memory-dmabuf` sends buffers flagged `PRIV_FLAGS_GPU_MEMORY` to
 
 ## 7. NVIDIA misreads two-plane NV12 imports
 
-Post this in the [NVIDIA developer forums, Linux category](https://forums.developer.nvidia.com/c/gpu-graphics/linux/148). Attach the log that `sudo nvidia-bug-report.sh` writes.
+Posted on 2026-11-04 as [forum thread 387942](https://forums.developer.nvidia.com/t/vulkan-some-nv12-dma-bufs-imported-as-two-plane-images-read-back-wrong-615-78-08/387942) in the Linux category, tagged `linux`, `linux-driver`, and `vulkan`, with the log from `sudo nvidia-bug-report.sh` attached.
 
 Title: `Vulkan: some NV12 dma-bufs imported as two-plane images read back wrong (615.78.08)`
 
@@ -352,4 +352,9 @@ These move them: the resolution, the allocation method, and the import order. Wi
 ### Impact
 
 Waydroid's compositor reads Android's video buffers this way through Venus, so some frames show as solid green or without colour.
+
+### Related reports
+
+- FFmpeg commit [bdc07f3](https://ffmpeg.org/pipermail/ffmpeg-cvslog/2025-March/147590.html) says NV12 images map into CUDA wrong when one memory object holds both planes, and that it was reported to NVIDIA. That is Vulkan export to CUDA, not dma-buf import, but the pattern is the same: two planes in one image fail, and separate planes work.
+- [Thread 371199](https://forums.developer.nvidia.com/t/nvidia-vulkan-vkimagedrmformatmodifierexplicitcreateinfoext-rejects-nv12-layouts-that-the-list-based-path-accepts/371199) reports that `vkCreateImage` rejects these NV12 buffers when the plane layout is given explicitly. Here the import succeeds and the data is wrong, with an explicit layout and with a modifier list.
 ````
