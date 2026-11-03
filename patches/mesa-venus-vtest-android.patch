@@ -78,7 +78,7 @@ index 1bd515c..70ac8e8 100644
 +
  #endif /* VTEST_PROTOCOL */
 diff --git a/src/virtio/vulkan/vn_android.c b/src/virtio/vulkan/vn_android.c
-index 52ed522..45b30a9 100644
+index 52ed522..24948ae 100644
 --- a/src/virtio/vulkan/vn_android.c
 +++ b/src/virtio/vulkan/vn_android.c
 @@ -11,16 +11,21 @@
@@ -206,7 +206,7 @@ index 52ed522..45b30a9 100644
        .handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT,
        .fd = dup_fd,
     };
-@@ -349,6 +372,87 @@ fail:
+@@ -349,6 +372,94 @@ fail:
     return result;
  }
  
@@ -214,13 +214,20 @@ index 52ed522..45b30a9 100644
 + * stencil attachment is bound, which every HWUI window does.  ANB images from
 + * grallocs without a GPU are linear, so render them through an optimal shadow
 + * image that vn_QueueSignalReleaseImageANDROID copies to the linear image.
++ * Buffers the gralloc placed in GPU memory are tiled and render directly.
 + */
 +static bool
-+vn_android_anb_needs_shadow(const VkImageCreateInfo *create_info)
++vn_android_anb_needs_shadow(const VkImageCreateInfo *create_info,
++                            const VkNativeBufferANDROID *anb_info)
 +{
 +   struct u_gralloc *gralloc = vk_android_get_ugralloc();
-+   return (create_info->usage & VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT) &&
-+          gralloc && u_gralloc_get_type(gralloc) == U_GRALLOC_TYPE_FALLBACK;
++   if (!(create_info->usage & VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT) ||
++       !gralloc || u_gralloc_get_type(gralloc) != U_GRALLOC_TYPE_FALLBACK)
++      return false;
++   struct vn_android_gralloc_buffer_properties props;
++   return !vn_android_gralloc_get_buffer_properties(
++             anb_info->handle, anb_info->stride, anb_info->format, &props) ||
++          props.modifier == DRM_FORMAT_MOD_LINEAR;
 +}
 +
 +static VkResult
@@ -294,11 +301,11 @@ index 52ed522..45b30a9 100644
  VkResult
  vn_android_image_from_anb(struct vn_device *dev,
                            const VkImageCreateInfo *create_info,
-@@ -356,9 +460,14 @@ vn_android_image_from_anb(struct vn_device *dev,
+@@ -356,9 +467,14 @@ vn_android_image_from_anb(struct vn_device *dev,
                            const VkAllocationCallbacks *alloc,
                            struct vn_image **out_img)
  {
-+   const bool needs_shadow = vn_android_anb_needs_shadow(create_info);
++   const bool needs_shadow = vn_android_anb_needs_shadow(create_info, anb_info);
 +   VkImageCreateInfo linear_info = *create_info;
 +   if (needs_shadow)
 +      linear_info.usage |= VK_IMAGE_USAGE_TRANSFER_DST_BIT;
@@ -310,7 +317,7 @@ index 52ed522..45b30a9 100644
     if (result != VK_SUCCESS)
        return result;
  
-@@ -374,10 +483,216 @@ vn_android_image_from_anb(struct vn_device *dev,
+@@ -374,10 +490,216 @@ vn_android_image_from_anb(struct vn_device *dev,
        return result;
     }
  
@@ -527,7 +534,7 @@ index 52ed522..45b30a9 100644
  struct vn_device_memory *
  vn_android_get_wsi_memory_from_bind_info(
     struct vn_device *dev, const VkBindImageMemoryInfo *bind_info)
-@@ -395,6 +710,41 @@ vn_android_get_wsi_memory_from_bind_info(
+@@ -395,6 +717,41 @@ vn_android_get_wsi_memory_from_bind_info(
     return img->wsi.anb_mem;
  }
  
@@ -569,7 +576,7 @@ index 52ed522..45b30a9 100644
  VkResult
  vn_android_device_import_ahb(struct vn_device *dev,
                               struct vn_device_memory *mem,
-@@ -422,9 +772,13 @@ vn_android_device_import_ahb(struct vn_device *dev,
+@@ -422,9 +779,13 @@ vn_android_device_import_ahb(struct vn_device *dev,
        struct vn_image *img = vn_image_from_handle(dedicated_info->image);
  
        /* If ahb is for an image, finish the deferred image creation first */
@@ -584,7 +591,7 @@ index 52ed522..45b30a9 100644
        if (result != VK_SUCCESS)
           return result;
  
-@@ -446,7 +800,7 @@ vn_android_device_import_ahb(struct vn_device *dev,
+@@ -446,7 +807,7 @@ vn_android_device_import_ahb(struct vn_device *dev,
     if (!mem_reqs.memoryTypeBits)
        return VK_ERROR_INVALID_EXTERNAL_HANDLE;
  
