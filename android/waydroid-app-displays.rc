@@ -1,0 +1,9 @@
+service waydroid_app_displays /system/bin/app_process /system/bin --nice-name=waydroid-app-displays waydroid.appdisplay.Main
+    user system
+    group system graphics input inet
+    setenv CLASSPATH /data/waydroid-app-displays/appdisplay.jar
+    disabled
+    oneshot
+
+on property:sys.boot_completed=1
+    start waydroid_app_displays
