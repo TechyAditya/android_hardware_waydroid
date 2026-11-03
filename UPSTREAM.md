@@ -1,11 +1,11 @@
 # Upstream pull requests and issues
 
-What this fork plans to send to Waydroid, in plain words. Open so far: [#92](https://github.com/waydroid/android_hardware_waydroid/pull/92), [android_vendor_waydroid#57](https://github.com/waydroid/android_vendor_waydroid/pull/57), and [#93](https://github.com/waydroid/android_hardware_waydroid/pull/93) for issue [waydroid#2470](https://github.com/waydroid/waydroid/issues/2470), with a reply posted on [#2464](https://github.com/waydroid/waydroid/issues/2464#issuecomment-6617138955). Nothing else has been posted.
+What this fork plans to send to Waydroid, in plain words. Open so far: [#92](https://github.com/waydroid/android_hardware_waydroid/pull/92), [android_vendor_waydroid#57](https://github.com/waydroid/android_vendor_waydroid/pull/57), [#93](https://github.com/waydroid/android_hardware_waydroid/pull/93) for issue [waydroid#2470](https://github.com/waydroid/waydroid/issues/2470), and [android_vendor_waydroid#58](https://github.com/waydroid/android_vendor_waydroid/pull/58) with [#94](https://github.com/waydroid/android_hardware_waydroid/pull/94) for issue [waydroid#2471](https://github.com/waydroid/waydroid/issues/2471). A reply is posted on [#2464](https://github.com/waydroid/waydroid/issues/2464#issuecomment-6617138955). Nothing else has been posted.
 
 1. **Smoother window resizing, without the crash.** Dragging a window edge made Android rebuild its screen about 150 times in 8 seconds, and Android's graphics crashed during the rebuilds ([#2464](https://github.com/waydroid/waydroid/issues/2464)). [#92](https://github.com/waydroid/android_hardware_waydroid/pull/92) cuts the rebuilds to about 15 and stretches the old frame meanwhile. It is open. [android_vendor_waydroid#57](https://github.com/waydroid/android_vendor_waydroid/pull/57), also open, adds the missing null check that SurfaceFlinger crashed on. After both are merged, ask the reporter to confirm that the SurfaceFlinger crash and the composer deaths are both gone, then close #2464. [Drafts](#1-resizing-and-the-surfaceflinger-crash)
 2. **No more black flashes in the full Waydroid window.** The window was shown before Android finished drawing it. One PR. [Draft](#2-black-flashes-in-the-full-ui)
 3. **Several app windows behave.** Each window keeps its own size and closes with its app. Closing the full Waydroid window closes only its own apps. Android follows the monitor's refresh rate. Open as issue [waydroid#2470](https://github.com/waydroid/waydroid/issues/2470) and PR [#93](https://github.com/waydroid/android_hardware_waydroid/pull/93). [Drafts](#3-several-app-windows)
-4. **Video shows in its own colours.** Ordinary (SDR) video no longer looks washed out, because Android stops brightening its dark parts; stock Waydroid does this too. HDR video shows as HDR when the compositor runs the monitor in HDR mode. One issue and two PRs, one in each repository. [Drafts](#4-video-colours)
+4. **Video shows in its own colours.** Ordinary (SDR) video no longer looks washed out, because Android stops brightening its dark parts; stock Waydroid does this too. HDR video shows as HDR when the compositor runs the monitor in HDR mode. Open as issue [waydroid#2471](https://github.com/waydroid/waydroid/issues/2471), with PRs [android_vendor_waydroid#58](https://github.com/waydroid/android_vendor_waydroid/pull/58) and [#94](https://github.com/waydroid/android_hardware_waydroid/pull/94). [Drafts](#4-video-colours)
 5. **No audio crackles at high sample rates.** A comment on [#91](https://github.com/waydroid/android_hardware_waydroid/pull/91), someone else's open audio PR, which already has half of the fix. [Draft](#5-audio-at-high-sample-rates)
 6. **Video buffers in GPU memory go straight to the compositor.** On hold: upstream has nothing that creates those buffers yet. [Note](#6-gpu-memory-buffers-as-dma-bufs)
 7. **Bug report to NVIDIA.** Their driver misreads some video buffers, which shows as green or colourless frames. Ready, with a small program that shows the bug. [Draft](#7-nvidia-misreads-two-plane-nv12-imports)
@@ -173,13 +173,13 @@ This branch alone was compiled, not run. I built the module outside the AOSP tre
 
 ## 4. Video colours
 
-One issue in `waydroid/waydroid` and two PRs: `waydroid/android_vendor_waydroid` from `TechyAditya:hdr`, and `waydroid/android_hardware_waydroid` from `TechyAditya:pr/hdr-output`. Open the issue first, then the vendor PR, then the composer PR, and replace `ISSUE`, `PR1`, and `PR2` with their numbers.
+Posted on 2026-11-04 as issue [waydroid/waydroid#2471](https://github.com/waydroid/waydroid/issues/2471), PR [waydroid/android_vendor_waydroid#58](https://github.com/waydroid/android_vendor_waydroid/pull/58) from `TechyAditya:hdr`, and PR [waydroid/android_hardware_waydroid#94](https://github.com/waydroid/android_hardware_waydroid/pull/94) from `TechyAditya:pr/hdr-output`. The drafts below use `ISSUE`, `PR1`, and `PR2` for those numbers.
 
 This fork fixes the SDR part in its host decoder, which tags SDR video as sRGB. Upstream has no host decoder, so the vendor PR sets SurfaceFlinger's own switch for it instead.
 
 The SDR measurements come from stock components on 2026-11-04: the grey-bar clip from `waydroid-venus/hwdec/test/ramp-check.sh`, played in Just Player, on the upstream `lineage-20` composer with software rendering through SwiftShader. This fork's decoder wrote YV12 into system memory, and only the transfer it reported changed between runs. The fork's gralloc and SurfaceFlinger null check were in place too, because stock `gralloc.default` cannot allocate YV12 (#2460) and stock SurfaceFlinger crashed when the player window opened (#2464). Neither touches colour. On NVIDIA the stock decoders cannot show the bug: they fail on the YV12 allocation, or fall back to RGB_565, which converts on the CPU before SurfaceFlinger.
 
-The earlier test that found `debug.sf.treat_170m_as_sRGB` had no effect set it to `true`. SurfaceFlinger reads it with `atoi()`, so that is 0.
+The earlier test that found `debug.sf.treat_170m_as_sRGB` had no effect set it to `true`. SurfaceFlinger reads it with `atoi()`, so that is 0. Set to 1, it works.
 
 ### Issue
 
@@ -245,7 +245,7 @@ Part of waydroid/waydroid#ISSUE. The HDR part needs waydroid/android_hardware_wa
 
 On Hyprland 0.57, CachyOS, an NVIDIA RTX 3060 (driver 615), and LineageOS 20 images:
 
-- SDR video: **Pending:** grey bars tagged SMPTE 170M, with the property set to 1.
+- SDR video: I played the grey bars from the issue with a host decoder that reports SMPTE 170M, and SurfaceFlinger showed the layer as `BT709 SMPTE_170M`. With the property set to 1, bars of 17, 34, 51, 68 and 85 showed at 16, 34, 50, 67 and 85. Without it, 17 showed at 31 and 34 at 50. I set the property in `/var/lib/waydroid/waydroid_base.prop`, not through this branch's `product.mk`.
 - HDR video: I built the patched adapter outside the AOSP tree, as `libhwc2on1adapter.so` in the vendor overlay, and ran it with the composer from waydroid/android_hardware_waydroid#PR2 on one HDR panel with Hyprland's HDR mode on. I have not built this branch in an AOSP tree.
 ```
 
