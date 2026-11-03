@@ -200,6 +200,8 @@ effective_scale(struct display *display, double *scale_x, double *scale_y) {
     }
 }
 
+static std::unique_lock<std::mutex> lock_resize(struct display *display);
+
 void
 finished_calibrating(struct display *d)
 {
@@ -212,6 +214,8 @@ finished_calibrating(struct display *d)
         property_set("ro.sf.lcd_density", lcd_density.c_str());
     }
 
+    // window::create() calibrates on the HWC thread while the Wayland thread handles configures
+    auto lock = lock_resize(d);
     choose_width_height(d, d->req_width, d->req_height);
     update_window_pixel_size(d);
 }
