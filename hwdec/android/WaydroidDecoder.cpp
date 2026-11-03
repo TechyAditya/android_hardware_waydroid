@@ -65,6 +65,15 @@ constexpr uint32_t kNativeUsageGpu = GRALLOC_USAGE_PRIVATE_0;
 constexpr int kGrallocMagic = 0x3141592;
 constexpr int kGrallocGpuMemory = 0x2;
 
+// The private_handle_t ints of HANDLE if it is a buffer in GPU memory, which
+// cannot be locked, else null.
+const int *gpuBufferInts(buffer_handle_t handle) {
+    const int *ints = handle->data + handle->numFds;
+    bool gpu = handle->numFds >= 1 && handle->numInts >= 14 && ints[0] == kGrallocMagic &&
+               (ints[1] & kGrallocGpuMemory);
+    return gpu ? ints : nullptr;
+}
+
 const CodecProfileLevel kAvcProfileLevels[] = {
     {OMX_VIDEO_AVCProfileConstrainedBaseline, OMX_VIDEO_AVCLevel52},
     {OMX_VIDEO_AVCProfileBaseline, OMX_VIDEO_AVCLevel52},
@@ -380,9 +389,7 @@ uint32_t WaydroidDecoder::registerTarget(buffer_handle_t handle) {
     hwdec_reply reply;
 
     // a buffer in GPU memory cannot be locked; its layout is in the handle
-    const int *ints = handle->data + handle->numFds;
-    if (handle->numFds >= 1 && handle->numInts >= 14 && ints[0] == kGrallocMagic &&
-        (ints[1] & kGrallocGpuMemory)) {
+    if (const int *ints = gpuBufferInts(handle)) {
         layout.offset[0] = ints[3];
         if (ints[7] == HAL_PIXEL_FORMAT_RGBA_8888) {
             layout.format = HWDEC_FORMAT_RGBA_GPU;
@@ -678,6 +685,16 @@ void WaydroidDecoder::onQueueFilled(OMX_U32 /* portIndex */) {
         if (mHaveHeldFrame) {
             reply = mHeldFrame;
             mHaveHeldFrame = false;
+            // The port reallocated its buffers for this frame: one the host
+            // wrote is in a buffer that is gone, and one in the shared memory
+            // cannot be copied into buffers in GPU memory.
+            auto handle = reinterpret_cast<buffer_handle_t>((*outQueue.begin())->mHeader->pBuffer);
+            if ((reply.flags & HWDEC_FRAME_IN_TARGET) ||
+                (mNativeBuffers && gpuBufferInts(handle))) {
+                ALOGW("dropped a %ux%u frame from before the output buffers changed",
+                      reply.width, reply.height);
+                continue;
+            }
         } else if (mPending || mDraining) {
             hwdec_output out = outputFor((*outQueue.begin())->mHeader);
             if (mSignalledError) return;

@@ -602,8 +602,10 @@ reply_frame(struct session *s, const struct hwdec_output *out)
    const struct target *t = NULL;
    if (out->target >= 1 && out->target <= HWDEC_MAX_TARGETS)
       t = &s->targets[out->target - 1];
-   bool fits = t && w == out->width && h == out->height && w <= t->layout.width &&
-               h <= t->layout.height;
+   /* Android cannot copy a frame into a buffer in GPU memory, so one takes
+    * any frame it holds; see struct hwdec_output */
+   bool fits = t && w <= t->layout.width && h <= t->layout.height &&
+               (t->gpu || (w == out->width && h == out->height));
 
    /* a frame for a target in GPU memory never leaves it */
    if (fits && t->gpu && gpu_copy(s->gpu, frame, t->gpu, w, h)) {

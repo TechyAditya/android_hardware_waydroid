@@ -104,9 +104,12 @@ struct hwdec_open {
    uint32_t codec;
 };
 
-/* Where a frame the request returns goes.  The host uses the target only
- * for a frame of exactly this size, so a frame that needs differently sized
- * buffers stays in the shared memory until the client has them. */
+/* Where a frame the request returns goes.  The host uses a target in system
+ * memory only for a frame of exactly this size, so a frame that needs
+ * differently sized buffers stays in the shared memory until the client has
+ * them.  A target in GPU memory, which the client cannot copy into, takes
+ * any frame that fits in it, top left: with adaptive playback the buffers
+ * are allocated for the largest size the stream switches to. */
 struct hwdec_output {
    /* a registered target, or 0 */
    uint32_t target;
