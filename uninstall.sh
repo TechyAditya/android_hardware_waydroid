@@ -8,6 +8,9 @@ hook=/usr/local/bin/waydroid
 
 if waydroid status 2> /dev/null | grep -q $'^Container:\tRUNNING'; then
    waydroid shell -- sh -c 'pid=$(pidof waydroid-app-displays) && kill $pid' || true
+   # The service pinned Android's refresh rate to its windows' monitors
+   waydroid shell -- sh -c 'settings delete system min_refresh_rate; settings delete system peak_refresh_rate' \
+      > /dev/null 2>&1 || true
 fi
 if [ -e "$hook" ]; then
    case "$(sed -n 2p "$hook")" in
