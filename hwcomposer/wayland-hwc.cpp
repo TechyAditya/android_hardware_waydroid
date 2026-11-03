@@ -265,6 +265,16 @@ xdg_toplevel_handle_configure(void *data, struct xdg_toplevel *,
 static void
 send_key_event(display *data, uint32_t key, wl_keyboard_key_state state);
 
+// Returns the decimal task id in ID, or -1. Ids come from layer names, and
+// std::stoi would abort the composer, which is built without exceptions.
+static int
+parse_task_id(const std::string &id)
+{
+    if (id.empty() || id.size() > 9 || id.find_first_not_of("0123456789") != std::string::npos)
+        return -1;
+    return atoi(id.c_str());
+}
+
 static void
 xdg_toplevel_handle_close(void *data, struct xdg_toplevel *)
 {
@@ -301,7 +311,9 @@ xdg_toplevel_handle_close(void *data, struct xdg_toplevel *)
                 for (int task : tasks)
                     display->task->removeTask(task);
             } else {
-                display->task->removeTask(stoi(taskID));
+                int task = parse_task_id(taskID);
+                if (task >= 0)
+                    display->task->removeTask(task);
             }
         }
     }
@@ -888,7 +900,7 @@ keyboard_handle_enter(void *data, struct wl_keyboard *,
             return; // Window was destroyed in hwc_set
 
         if (window->taskID != "none" && window->taskID != "0")
-            taskID = stoi(window->taskID);
+            taskID = parse_task_id(window->taskID);
     }
 
     if (taskID >= 0) {
