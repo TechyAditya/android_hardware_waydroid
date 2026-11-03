@@ -169,7 +169,8 @@ struct hwdec_reply {
    uint32_t stride[3];
    /* nonzero when a new shared memory fd is attached to this reply */
    uint64_t shm_size;
-   /* ISO/IEC 23091-4 values; 2 means unspecified */
+   /* ISO/IEC 23091-4 values; 2 means unspecified.  SDR transfers come back
+    * as sRGB (13), which Android shows as is. */
    uint8_t primaries;
    uint8_t transfer;
    uint8_t matrix;
