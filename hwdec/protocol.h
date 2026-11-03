@@ -7,15 +7,16 @@
  * The host writes a frame into a target buffer the client registered, which
  * is how frames go straight into Android's gralloc buffers, or else into a
  * shared memfd that it attaches (SCM_RIGHTS) to the reply that first uses
- * it.  8-bit frames are I420; 10-bit frames are P010 in targets and 16-bit
- * I420 in the shared memory.
+ * it.  8-bit frames are I420, or NV12 in targets in GPU memory, which the
+ * host fills by a copy on the GPU; 10-bit frames are P010 in targets and
+ * 16-bit I420 in the shared memory.
  */
 #ifndef WAYDROID_HWDEC_PROTOCOL_H
 #define WAYDROID_HWDEC_PROTOCOL_H
 
 #include <stdint.h>
 
-#define HWDEC_VERSION 3
+#define HWDEC_VERSION 4
 #define HWDEC_SOCKET_NAME "hwdec.sock"
 #define HWDEC_MAX_PACKET_SIZE (64u << 20)
 #define HWDEC_MAX_DIMENSION 8192u
@@ -30,7 +31,9 @@ enum hwdec_codec {
 };
 
 enum hwdec_request_type {
-   /* payload: struct hwdec_open; reply HWDEC_REPLY_OK or HWDEC_REPLY_ERROR */
+   /* payload: struct hwdec_open; reply HWDEC_REPLY_OK, with
+    * HWDEC_OPEN_GPU_TARGETS set if the host writes NV12 targets in GPU
+    * memory, or HWDEC_REPLY_ERROR */
    HWDEC_REQUEST_OPEN = 1,
    /* payload: struct hwdec_packet, then the bitstream; reply a frame or
     * HWDEC_REPLY_NO_FRAME */
@@ -44,8 +47,9 @@ enum hwdec_request_type {
    HWDEC_REQUEST_DRAIN = 4,
    /* no payload; drops every queued packet and frame; reply HWDEC_REPLY_OK */
    HWDEC_REQUEST_FLUSH = 5,
-   /* payload: struct hwdec_target, with the buffer's memfd attached; reply
-    * HWDEC_REPLY_OK, or HWDEC_REPLY_ERROR if the host cannot write to it */
+   /* payload: struct hwdec_target, with the buffer's memfd, or for
+    * HWDEC_FORMAT_NV12_GPU its dma-buf, attached; reply HWDEC_REPLY_OK, or
+    * HWDEC_REPLY_ERROR if the host cannot write to it */
    HWDEC_REQUEST_REGISTER = 6,
    /* no payload; forgets every target; reply HWDEC_REPLY_OK */
    HWDEC_REQUEST_UNREGISTER_ALL = 7,
@@ -68,7 +72,13 @@ enum hwdec_format {
    /* 16-bit Y plane and interleaved CbCr plane holding 10-bit values in the
     * high bits */
    HWDEC_FORMAT_P010 = 3,
+   /* 8-bit Y plane and interleaved CbCr plane in a dma-buf in GPU memory,
+    * laid out by a DRM format modifier; targets only */
+   HWDEC_FORMAT_NV12_GPU = 4,
 };
+
+/* in the reply to HWDEC_REQUEST_OPEN */
+#define HWDEC_OPEN_GPU_TARGETS (1u << 0)
 
 /* the packet is codec configuration (csd), not a frame */
 #define HWDEC_PACKET_CONFIG (1u << 0)
@@ -103,9 +113,10 @@ struct hwdec_packet {
 };
 
 /* A buffer of the attached memfd with Y, Cb and Cr planes at these offsets
- * (for P010, Cr follows Cb in the same plane).  The memfd must be sealed
- * against shrinking.  The host writes only frames of the buffer's format:
- * I420 or P010. */
+ * (for P010 and NV12, Cr follows Cb in the same plane).  The memfd must be
+ * sealed against shrinking.  The host writes only frames of the buffer's
+ * format: I420, P010 or, into a dma-buf whose layout the modifier names,
+ * NV12. */
 struct hwdec_target {
    uint32_t id; /* 1 to HWDEC_MAX_TARGETS */
    uint32_t format;
@@ -113,6 +124,9 @@ struct hwdec_target {
    uint32_t height;
    uint32_t offset[3];
    uint32_t stride[3];
+   /* DRM format modifier of an HWDEC_FORMAT_NV12_GPU buffer */
+   uint32_t modifier_lo;
+   uint32_t modifier_hi;
 };
 
 /* SMPTE ST 2086 mastering display and CTA-861.3 content light levels, in
@@ -161,7 +175,7 @@ struct hwdec_reply {
 #define HWDEC_ASSERT(e) _Static_assert(e, #e)
 #endif
 HWDEC_ASSERT(sizeof(struct hwdec_packet) == 24);
-HWDEC_ASSERT(sizeof(struct hwdec_target) == 40);
+HWDEC_ASSERT(sizeof(struct hwdec_target) == 48);
 HWDEC_ASSERT(sizeof(struct hwdec_hdr) == 24);
 HWDEC_ASSERT(sizeof(struct hwdec_reply) == 96);
 

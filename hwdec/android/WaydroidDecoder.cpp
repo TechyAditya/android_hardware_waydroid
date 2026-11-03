@@ -6,7 +6,9 @@
  * requests to the host; see ../protocol.h.
  *
  * When ACodec renders to a surface, the output buffers are the surface's
- * YV12 gralloc buffers, and the host writes frames straight into them.
+ * gralloc buffers, and the host writes frames straight into them: 8-bit
+ * frames into NV12 buffers in GPU memory by a copy on the GPU, if the host
+ * can, else into YV12 buffers, and 10-bit frames into P010 buffers.
  * Otherwise frames come back in shared memory and are copied out.
  */
 #define LOG_TAG "WaydroidDecoder"
@@ -45,6 +47,16 @@ constexpr OMX_COLOR_FORMATTYPE kNativeFormat = static_cast<OMX_COLOR_FORMATTYPE>
 constexpr OMX_COLOR_FORMATTYPE kNativeFormat10 =
         static_cast<OMX_COLOR_FORMATTYPE>(HAL_PIXEL_FORMAT_YCBCR_P010);
 constexpr uint32_t kNativeUsage = GRALLOC_USAGE_SW_WRITE_OFTEN;
+// Waydroid's gralloc allocates flexible YCbCr 4:2:0 that asks for
+// GRALLOC_USAGE_PRIVATE_0 alone as NV12 in GPU memory
+constexpr OMX_COLOR_FORMATTYPE kNativeFormatGpu =
+        static_cast<OMX_COLOR_FORMATTYPE>(HAL_PIXEL_FORMAT_YCbCr_420_888);
+constexpr uint32_t kNativeUsageGpu = GRALLOC_USAGE_PRIVATE_0;
+// gralloc.default's private_handle_t: after the fd, magic and flags; for a
+// buffer in GPU memory its luma offset at 3, stride at 10, DRM format
+// modifier at 11 (low) and 12 (high) and CbCr offset at 13
+constexpr int kGrallocMagic = 0x3141592;
+constexpr int kGrallocGpuMemory = 0x2;
 
 const CodecProfileLevel kAvcProfileLevels[] = {
     {OMX_VIDEO_AVCProfileConstrainedBaseline, OMX_VIDEO_AVCLevel52},
@@ -158,6 +170,8 @@ class WaydroidDecoder : public SoftVideoDecoderOMXComponent {
 
     int mFd = -1;
     bool mConnected = false;
+    // the host writes 8-bit frames into NV12 buffers in GPU memory
+    bool mGpuTargets = false;
     uint8_t *mShm = nullptr;
     size_t mShmSize = 0;
     const gralloc_module_t *mGralloc = nullptr;
@@ -220,6 +234,7 @@ bool WaydroidDecoder::connectHost(uint32_t codec) {
         ALOGE("the host cannot open decoder %u", codec);
         return false;
     }
+    mGpuTargets = reply.flags & HWDEC_OPEN_GPU_TARGETS;
     return true;
 }
 
@@ -346,11 +361,32 @@ uint32_t WaydroidDecoder::registerTarget(buffer_handle_t handle) {
     uint32_t id = mTargets.size() + 1;
     if (id > HWDEC_MAX_TARGETS) return 0;
 
-    // the plane offsets in the buffer's fd, from where the gralloc maps it
     hwdec_target layout = {};
     layout.id = id;
     layout.width = outputBufferWidth();
     layout.height = outputBufferHeight();
+    hwdec_reply reply;
+
+    // a buffer in GPU memory cannot be locked; its layout is in the handle
+    const int *ints = handle->data + handle->numFds;
+    if (handle->numFds >= 1 && handle->numInts >= 14 && ints[0] == kGrallocMagic &&
+        (ints[1] & kGrallocGpuMemory)) {
+        layout.format = HWDEC_FORMAT_NV12_GPU;
+        layout.offset[0] = ints[3];
+        layout.offset[1] = ints[13];
+        layout.stride[0] = layout.stride[1] = ints[10];
+        layout.modifier_lo = ints[11];
+        layout.modifier_hi = ints[12];
+        if (!request(HWDEC_REQUEST_REGISTER, &layout, sizeof(layout), nullptr, 0,
+                     handle->data[0], &reply))
+            return 0;
+        target.direct = reply.type == HWDEC_REPLY_OK;
+        if (!target.direct) ALOGE("the host cannot write to buffer %u in GPU memory", id);
+        mTargets.push(target);
+        return id;
+    }
+
+    // the plane offsets in the buffer's fd, from where the gralloc maps it
     void *base = nullptr;
     android_ycbcr ycbcr = {};
     bool mapped = mGralloc->lock(mGralloc, handle, kNativeUsage, 0, 0, layout.width, layout.height,
@@ -372,7 +408,6 @@ uint32_t WaydroidDecoder::registerTarget(buffer_handle_t handle) {
             layout.offset[i] = planes[i] - static_cast<uint8_t *>(base);
             layout.stride[i] = strides[i];
         }
-        hwdec_reply reply;
         if (layout.format && handle->numFds >= 1) {
             if (!request(HWDEC_REQUEST_REGISTER, &layout, sizeof(layout), nullptr, 0,
                          handle->data[0], &reply))
@@ -445,7 +480,7 @@ bool WaydroidDecoder::copyToGraphicBuffer(const hwdec_reply &frame, buffer_handl
 
 OMX_COLOR_FORMATTYPE WaydroidDecoder::formatFor(const hwdec_reply &frame) const {
     bool deep = frame.format == HWDEC_FORMAT_I420_10 || frame.format == HWDEC_FORMAT_P010;
-    if (mNativeBuffers) return deep ? kNativeFormat10 : kNativeFormat;
+    if (mNativeBuffers) return deep ? kNativeFormat10 : mGpuTargets ? kNativeFormatGpu : kNativeFormat;
     return deep ? OMX_COLOR_FormatYUV420Planar16 : OMX_COLOR_FormatYUV420Planar;
 }
 
@@ -551,7 +586,8 @@ OMX_ERRORTYPE WaydroidDecoder::internalGetParameter(OMX_INDEXTYPE index, OMX_PTR
             auto *param = static_cast<GetAndroidNativeBufferUsageParams *>(params);
             if (!isValidOMXParam(param)) return OMX_ErrorBadParameter;
             if (param->nPortIndex != kOutputPortIndex) return OMX_ErrorBadPortIndex;
-            param->nUsage = kNativeUsage;
+            // GPU memory, unless 10-bit frames need P010 buffers in system memory
+            param->nUsage = mOutputFormat == kNativeFormatGpu ? kNativeUsageGpu : kNativeUsage;
             return OMX_ErrorNone;
         }
         case OMX_IndexParamVideoPortFormat: {
@@ -574,7 +610,9 @@ OMX_ERRORTYPE WaydroidDecoder::internalSetParameter(OMX_INDEXTYPE index, const O
             // ACodec passes the output color format to the surface as its HAL
             // pixel format.
             mNativeBuffers = param->enable;
-            mOutputFormat = mNativeBuffers ? kNativeFormat : OMX_COLOR_FormatYUV420Planar;
+            mOutputFormat = !mNativeBuffers ? OMX_COLOR_FormatYUV420Planar
+                            : mGpuTargets  ? kNativeFormatGpu
+                                           : kNativeFormat;
             updatePortDefinitions();
             clearTargets();
             return OMX_ErrorNone;

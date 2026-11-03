@@ -112,7 +112,7 @@ rm -rf "$host_out.tmp"
 cc -O2 -Wall -Wextra -D_FORTIFY_SOURCE=3 -fstack-protector-strong -fstack-clash-protection \
    -fPIE -pie -Wl,-z,relro,-z,now -pthread \
    -o "$host_out/bin/waydroid-hwdec" "$here/hwdec/host/waydroid-hwdec.c" \
-   $(pkg-config --cflags --libs libavcodec libavutil libswscale)
+   "$here/hwdec/host/gpu_target.c" $(pkg-config --cflags --libs libavcodec libavutil libswscale vulkan)
 
 ndk_bin=$ndk/toolchains/llvm/prebuilt/linux-x86_64/bin
 gralloc_src=$build/libhardware/modules/gralloc

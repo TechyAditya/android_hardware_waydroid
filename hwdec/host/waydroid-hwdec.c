@@ -29,6 +29,7 @@
 #include <libswscale/swscale.h>
 
 #include "../protocol.h"
+#include "gpu_target.h"
 
 /* frames the decoder may hold beyond its references, for the reply queue */
 #define EXTRA_HW_FRAMES 8
@@ -40,10 +41,14 @@ static unsigned max_sessions = 16;
 static atomic_uint sessions;
 
 static pthread_mutex_t device_lock = PTHREAD_MUTEX_INITIALIZER;
+/* --device, or AV_HWDEVICE_TYPE_NONE */
 static enum AVHWDeviceType device_type = AV_HWDEVICE_TYPE_NONE;
-static AVBufferRef *device;
-static enum AVPixelFormat device_format = AV_PIX_FMT_NONE;
-static bool device_failed;
+#define MAX_DEVICE_TYPES 32
+static struct {
+   AVBufferRef *ref;
+   bool failed;
+} devices[MAX_DEVICE_TYPES];
+static bool cpu_logged;
 
 static void
 log_msg(const char *fmt, ...)
@@ -70,35 +75,44 @@ hw_format(enum AVHWDeviceType type)
    }
 }
 
-/* One device shared by all decoders; creating a CUDA context costs ~100 ms
- * and hundreds of MB of GPU memory.  Without --device, the first of CUDA
- * (NVIDIA), VA-API (Intel, AMD) and Vulkan that works. */
+/* One device of each type shared by all decoders; creating a CUDA context
+ * costs ~100 ms and hundreds of MB of GPU memory.  Without --device, the
+ * first that works of Vulkan, which can copy frames into Android's buffers
+ * in GPU memory (gpu_target.c), CUDA (NVIDIA) and VA-API (Intel, AMD).
+ * FFmpeg decodes VP8 with CUDA or VA-API only. */
 static AVBufferRef *
-get_device(void)
+get_device(enum AVCodecID codec)
 {
    static const enum AVHWDeviceType types[] = {
+      AV_HWDEVICE_TYPE_VULKAN,
       AV_HWDEVICE_TYPE_CUDA,
       AV_HWDEVICE_TYPE_VAAPI,
-      AV_HWDEVICE_TYPE_VULKAN,
    };
+   AVBufferRef *ref = NULL;
    pthread_mutex_lock(&device_lock);
-   for (unsigned i = 0; !device && !device_failed && i < sizeof(types) / sizeof(types[0]); i++) {
+   for (unsigned i = 0; !ref && i < sizeof(types) / sizeof(types[0]); i++) {
       enum AVHWDeviceType type = device_type != AV_HWDEVICE_TYPE_NONE ? device_type : types[i];
-      int err = av_hwdevice_ctx_create(&device, type, NULL, NULL, 0);
-      if (err == 0) {
-         device_format = hw_format(type);
-         log_msg("decoding with %s", av_hwdevice_get_type_name(type));
-      } else {
-         log_msg("no %s device: %s", av_hwdevice_get_type_name(type), av_err2str(err));
+      if (device_type == AV_HWDEVICE_TYPE_NONE && type == AV_HWDEVICE_TYPE_VULKAN &&
+          codec == AV_CODEC_ID_VP8)
+         continue;
+      if ((unsigned)type < MAX_DEVICE_TYPES && !devices[type].ref && !devices[type].failed) {
+         int err = av_hwdevice_ctx_create(&devices[type].ref, type, NULL, NULL, 0);
+         if (err == 0) {
+            log_msg("decoding with %s", av_hwdevice_get_type_name(type));
+         } else {
+            log_msg("no %s device: %s", av_hwdevice_get_type_name(type), av_err2str(err));
+            devices[type].failed = true;
+         }
       }
+      if ((unsigned)type < MAX_DEVICE_TYPES && devices[type].ref)
+         ref = av_buffer_ref(devices[type].ref);
       if (device_type != AV_HWDEVICE_TYPE_NONE)
          break;
    }
-   if (!device && !device_failed) {
-      log_msg("no GPU decoder, decoding on the CPU");
-      device_failed = true;
+   if (!ref && !cpu_logged) {
+      log_msg("no GPU decoder for %s, decoding on the CPU", avcodec_get_name(codec));
+      cpu_logged = true;
    }
-   AVBufferRef *ref = device ? av_buffer_ref(device) : NULL;
    pthread_mutex_unlock(&device_lock);
    return ref;
 }
@@ -108,6 +122,8 @@ struct target {
    struct hwdec_target layout;
    uint8_t *map;
    size_t size;
+   /* an HWDEC_FORMAT_NV12_GPU target */
+   struct gpu_image *gpu;
 };
 
 struct session {
@@ -116,6 +132,8 @@ struct session {
    int received_fd;
    struct target targets[HWDEC_MAX_TARGETS];
    AVCodecContext *ctx;
+   /* copies into targets in GPU memory, when decoding with Vulkan */
+   struct gpu_ctx *gpu;
    AVPacket *pkt;
    AVFrame *queue[MAX_QUEUED_FRAMES];
    unsigned queued;
@@ -195,6 +213,8 @@ unregister_targets(struct session *s)
       if (s->targets[i].map)
          munmap(s->targets[i].map, s->targets[i].size);
       s->targets[i].map = NULL;
+      gpu_release(s->gpu, s->targets[i].gpu);
+      s->targets[i].gpu = NULL;
    }
 }
 
@@ -215,9 +235,30 @@ register_target(struct session *s, const struct hwdec_target *layout)
       return false;
 
    bool ok = false;
+   uint32_t w = layout->width, h = layout->height;
+   if (layout->format == HWDEC_FORMAT_NV12_GPU) {
+      /* Vulkan checks the layout against the dma-buf when importing it */
+      if (!s->gpu || layout->id < 1 || layout->id > HWDEC_MAX_TARGETS || !w || !h || w % 2 ||
+          h % 2 || w > HWDEC_MAX_DIMENSION || h > HWDEC_MAX_DIMENSION ||
+          layout->stride[1] != layout->stride[0])
+         goto out;
+      struct target *t = &s->targets[layout->id - 1];
+      uint64_t modifier = (uint64_t)layout->modifier_hi << 32 | layout->modifier_lo;
+      struct gpu_image *img =
+         gpu_import(s->gpu, fd, w, h, modifier, layout->offset, layout->stride[0]);
+      if (!img)
+         goto out;
+      if (t->map)
+         munmap(t->map, t->size);
+      t->map = NULL;
+      gpu_release(s->gpu, t->gpu);
+      t->gpu = img;
+      t->layout = *layout;
+      ok = true;
+      goto out;
+   }
    struct stat st;
    int seals = fcntl(fd, F_GET_SEALS);
-   uint32_t w = layout->width, h = layout->height;
    uint32_t cw = (w + 1) / 2, ch = (h + 1) / 2;
    if (layout->id < 1 || layout->id > HWDEC_MAX_TARGETS || !w || !h ||
        w > HWDEC_MAX_DIMENSION || h > HWDEC_MAX_DIMENSION || seals < 0 ||
@@ -245,6 +286,8 @@ register_target(struct session *s, const struct hwdec_target *layout)
    struct target *t = &s->targets[layout->id - 1];
    if (t->map)
       munmap(t->map, t->size);
+   gpu_release(s->gpu, t->gpu);
+   t->gpu = NULL;
    t->layout = *layout;
    t->map = map;
    t->size = size;
@@ -338,6 +381,8 @@ get_format(AVCodecContext *ctx, const enum AVPixelFormat *formats)
 {
    const enum AVPixelFormat *f;
    if (ctx->hw_device_ctx) {
+      enum AVPixelFormat device_format =
+         hw_format(((AVHWDeviceContext *)ctx->hw_device_ctx->data)->type);
       for (f = formats; *f != AV_PIX_FMT_NONE; f++) {
          if (*f == device_format)
             return *f;
@@ -405,14 +450,17 @@ create_context(struct session *s, const AVCodec *codec)
    s->ctx = avcodec_alloc_context3(codec);
    if (!s->ctx)
       return false;
-   s->ctx->hw_device_ctx = get_device();
+   s->ctx->hw_device_ctx = get_device(codec->id);
    s->ctx->get_format = get_format;
    s->ctx->extra_hw_frames = EXTRA_HW_FRAMES;
    s->ctx->pkt_timebase = (AVRational){ 1, 1000000 };
    /* frame threads only help the CPU fallback and add latency */
    s->ctx->thread_count = s->ctx->hw_device_ctx ? 1 : 0;
-   if (avcodec_open2(s->ctx, codec, NULL) == 0)
+   if (avcodec_open2(s->ctx, codec, NULL) == 0) {
+      if (!s->gpu)
+         s->gpu = gpu_create(s->ctx->hw_device_ctx);
       return true;
+   }
    /* without a context, every later request closes the connection */
    avcodec_free_context(&s->ctx);
    return false;
@@ -518,6 +566,24 @@ fill_hdr(struct hwdec_hdr *hdr, const AVFrame *frame)
    }
 }
 
+static struct hwdec_reply
+frame_reply(const struct session *s, const AVFrame *frame)
+{
+   struct hwdec_reply reply = {
+      .type = HWDEC_REPLY_FRAME,
+      .pending = s->queued,
+      .timestamp = frame->pts != AV_NOPTS_VALUE ? frame->pts : frame->best_effort_timestamp,
+      .width = frame->width,
+      .height = frame->height,
+      .primaries = frame->color_primaries,
+      .transfer = frame->color_trc,
+      .matrix = frame->colorspace,
+      .full_range = frame->color_range == AVCOL_RANGE_JPEG,
+   };
+   fill_hdr(&reply.hdr, frame);
+   return reply;
+}
+
 /* Converts the next queued frame into OUT's target, or else the shared
  * memory, and replies with it. */
 static bool
@@ -525,6 +591,26 @@ reply_frame(struct session *s, const struct hwdec_output *out)
 {
    AVFrame *frame = s->queue[0];
    memmove(s->queue, s->queue + 1, --s->queued * sizeof(s->queue[0]));
+
+   unsigned w = frame->width, h = frame->height;
+   if (!w || !h || w > HWDEC_MAX_DIMENSION || h > HWDEC_MAX_DIMENSION) {
+      av_frame_free(&frame);
+      return reply_simple(s, HWDEC_REPLY_ERROR);
+   }
+   const struct target *t = NULL;
+   if (out->target >= 1 && out->target <= HWDEC_MAX_TARGETS)
+      t = &s->targets[out->target - 1];
+   bool fits = t && w == out->width && h == out->height && w <= t->layout.width &&
+               h <= t->layout.height;
+
+   /* a frame for a target in GPU memory never leaves it */
+   if (fits && t->gpu && gpu_copy(s->gpu, frame, t->gpu, w, h)) {
+      struct hwdec_reply reply = frame_reply(s, frame);
+      reply.format = HWDEC_FORMAT_NV12_GPU;
+      reply.flags |= HWDEC_FRAME_IN_TARGET;
+      av_frame_free(&frame);
+      return send_reply(s, &reply);
+   }
 
    AVFrame *src = frame;
    if (frame->hw_frames_ctx) {
@@ -536,35 +622,14 @@ reply_frame(struct session *s, const struct hwdec_output *out)
       src = s->download;
    }
 
-   unsigned w = frame->width, h = frame->height;
-   if (!w || !h || w > HWDEC_MAX_DIMENSION || h > HWDEC_MAX_DIMENSION) {
-      av_frame_free(&frame);
-      return reply_simple(s, HWDEC_REPLY_ERROR);
-   }
    unsigned cw = (w + 1) / 2, ch = (h + 1) / 2;
    bool deep = av_pix_fmt_desc_get(src->format)->comp[0].depth > 8;
-   struct hwdec_reply reply = {
-      .type = HWDEC_REPLY_FRAME,
-      .pending = s->queued,
-      .timestamp = frame->pts != AV_NOPTS_VALUE ? frame->pts : frame->best_effort_timestamp,
-      .width = w,
-      .height = h,
-      .primaries = frame->color_primaries,
-      .transfer = frame->color_trc,
-      .matrix = frame->colorspace,
-      .full_range = frame->color_range == AVCOL_RANGE_JPEG,
-   };
-   fill_hdr(&reply.hdr, frame);
+   struct hwdec_reply reply = frame_reply(s, frame);
 
    uint8_t *dst[4] = { 0 };
    int dst_stride[4] = { 0 };
    enum AVPixelFormat dst_format;
-   const struct target *t = NULL;
-   if (out->target >= 1 && out->target <= HWDEC_MAX_TARGETS)
-      t = &s->targets[out->target - 1];
-   if (t && t->map && w == out->width && h == out->height && w <= t->layout.width &&
-       h <= t->layout.height &&
-       t->layout.format == (deep ? HWDEC_FORMAT_P010 : HWDEC_FORMAT_I420)) {
+   if (fits && t->map && t->layout.format == (deep ? HWDEC_FORMAT_P010 : HWDEC_FORMAT_I420)) {
       int planes = deep ? 2 : 3;
       for (int i = 0; i < planes; i++) {
          dst[i] = t->map + t->layout.offset[i];
@@ -746,7 +811,11 @@ handle_request(struct session *s, const struct hwdec_request *req)
          reply_simple(s, HWDEC_REPLY_ERROR);
          return false;
       }
-      return reply_simple(s, HWDEC_REPLY_OK);
+      struct hwdec_reply reply = {
+         .type = HWDEC_REPLY_OK,
+         .flags = s->gpu ? HWDEC_OPEN_GPU_TARGETS : 0,
+      };
+      return send_reply(s, &reply);
    }
    case HWDEC_REQUEST_DECODE:
       return handle_decode(s, req->size);
@@ -820,6 +889,7 @@ session_main(void *arg)
    unregister_targets(s);
    clear_queue(s);
    avcodec_free_context(&s->ctx);
+   gpu_destroy(s->gpu);
    av_parser_close(s->parser);
    avcodec_free_context(&s->parser_ctx);
    av_packet_free(&s->pkt);
