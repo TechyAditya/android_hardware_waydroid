@@ -21,6 +21,8 @@ gh pr create -R waydroid/REPO -B lineage-20 -H TechyAditya:BRANCH --title "TITLE
 
 [#92](https://github.com/waydroid/android_hardware_waydroid/pull/92) is open. Its description is current, and every review thread is resolved. It mitigates #2464 but does not fix it: the option is off by default, and a launch still reconnects the display once.
 
+#2464 can close once both PRs are merged and the reporter confirms that both crashes are gone: the SurfaceFlinger SIGSEGV, and the composer deaths (SIGABRT, signal 13) after which SurfaceFlinger aborts. The SurfaceFlinger patch fixes the first. The composer deaths have no confirmed cause; #92 made them stop on this setup. So neither PR says "Fixes", which would close the issue on merge. Close it by hand after the reporter replies.
+
 ### PR: SurfaceFlinger null check
 
 `waydroid/android_vendor_waydroid`, head `TechyAditya:sf-default-display`. The branch adds `waydroid-patches/base-patches-33/frameworks/native/0016-surfaceflinger-Check-for-a-missing-default-display-i.patch`. All 16 patches apply to LineageOS `android_frameworks_native` `lineage-20.0` (`915ad642`). It has not been built in an AOSP tree. The 5-byte binary patch that `stack/surfaceflinger.sh` installs does the same thing and has run since 2026-11-02.
@@ -28,7 +30,7 @@ gh pr create -R waydroid/REPO -B lineage-20 -H TechyAditya:BRANCH --title "TITLE
 Title: `waydroid-patches: surfaceflinger: Check for a missing default display`
 
 ```markdown
-Fixes waydroid/waydroid#2464.
+Addresses waydroid/waydroid#2464, together with waydroid/android_hardware_waydroid#92.
 
 ## Problem
 
@@ -47,10 +49,15 @@ The patch applies after patches 0001 to 0015 on LineageOS `android_frameworks_na
 
 ### Comment: answer the reporter on #2464
 
-The reporter asked on 2026-11-03 whether to switch away from the Android 13 image.
+The reporter asked on 2026-11-03 whether to switch away from the Android 13 image. Post this after both PRs are open, so it can link them.
 
 ```markdown
-@CodeWithKhan07 No need to change images. The crash is in Android 13's SurfaceFlinger, and the LineageOS 20 images are the current x86_64 builds. Steps 1 and 2 of my comment keep the display from reconnecting dozens of times during a drag, which is what opens the window for the crash. With both, I have not seen it since, on Hyprland 0.57. Your Intel GPU uses `gralloc=gbm`, so the composer from waydroid/android_hardware_waydroid#92 works there too. Step 3 removes the crash itself, but its binary patch matches only the `20260927` system image. Yours is that image: `system_datetime = 1790512621` is 2026-09-27. The same fix as a source patch is in waydroid/android_vendor_waydroid#PR.
+@CodeWithKhan07 No need to change images. The crash is in Android 13's SurfaceFlinger, and the LineageOS 20 images are the current x86_64 builds. Your report has two kinds of crash, and there is now a fix for each to try:
+
+1. The SurfaceFlinger SIGSEGV in `getPhysicalDisplayIds`. waydroid/android_vendor_waydroid#PR adds the missing null check. Until an image has it, step 3 of my comment installs the same check as a binary patch. That patch matches only the `20260927` system image, and yours is that image: `system_datetime = 1790512621` is 2026-09-27.
+2. The composer deaths (SIGABRT, and signal 13 at 10:37:16), after which SurfaceFlinger aborts. I could not find their cause, but they stopped for me with waydroid/android_hardware_waydroid#92 and `persist.waydroid.resize_interval_ms = 500` (step 2). Your Intel GPU uses `gralloc=gbm`, and the composer from #92 works with it.
+
+Could you try both and say whether launching and resizing still crash? If either crash comes back, `coredumpctl list` and `waydroid logcat` around it would help. I only tested on Hyprland 0.57 with an NVIDIA GPU.
 ```
 
 ## 2. Black flashes in the full UI
