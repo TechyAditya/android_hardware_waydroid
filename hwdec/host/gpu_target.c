@@ -54,6 +54,8 @@ struct gpu_ctx {
    VkCommandPool pool;
    VkCommandBuffer cmd;
    VkFence fence;
+   /* NVIDIA, which misreads some NV12 imports; see gpu_target.h */
+   bool nv12_unreliable;
 
    /* the conversion for RGBA buffers; no pipeline if the queue cannot
     * compute */
@@ -368,6 +370,15 @@ gpu_create(AVBufferRef *device)
    }
    if (hw->qf[qf].flags & VK_QUEUE_COMPUTE_BIT)
       create_converter(g);
+
+   PFN_vkGetPhysicalDeviceProperties get_props =
+      (PFN_vkGetPhysicalDeviceProperties)hw->get_proc_addr(hw->inst,
+                                                           "vkGetPhysicalDeviceProperties");
+   if (get_props) {
+      VkPhysicalDeviceProperties props;
+      get_props(hw->phys_dev, &props);
+      g->nv12_unreliable = props.vendorID == 0x10de;
+   }
    return g;
 }
 
@@ -386,6 +397,12 @@ bool
 gpu_can_convert(const struct gpu_ctx *g)
 {
    return g && g->pipeline;
+}
+
+bool
+gpu_nv12_unreliable(const struct gpu_ctx *g)
+{
+   return g && g->nv12_unreliable;
 }
 
 /* Imports the plane of FD at OFFSET as a WIDTH x HEIGHT image of FORMAT. */

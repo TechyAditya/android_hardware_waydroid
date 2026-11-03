@@ -7,12 +7,13 @@
  *
  * When ACodec renders to a surface, the output buffers are the surface's
  * gralloc buffers, and the host writes frames straight into them: 8-bit
- * frames into buffers in GPU memory if the host can, RGBA it converts them
- * to or else NV12 it copies them into, otherwise into YV12 buffers, and
- * 10-bit frames into P010 buffers.  RGBA comes first because NVIDIA misreads
- * some NV12 buffers when SurfaceFlinger samples them, which shows as green
- * or colourless frames.  Without a surface, frames come back in shared
- * memory and are copied out.
+ * frames into RGBA or NV12 buffers in GPU memory if the host can, otherwise
+ * into YV12 buffers, and 10-bit frames into P010 buffers.  On NVIDIA, which
+ * misreads some NV12 buffers when SurfaceFlinger samples them (green or
+ * colourless frames), the host converts 8-bit frames to RGBA instead.
+ * persist.waydroid.video_sdr_output picks the format of 8-bit frames: auto
+ * (default), rgba, nv12 or system (YV12).  Without a surface, frames come
+ * back in shared memory and are copied out.
  */
 #define LOG_TAG "WaydroidDecoder"
 
@@ -25,6 +26,7 @@
 #include <sys/un.h>
 #include <unistd.h>
 
+#include <cutils/properties.h>
 #include <hardware/gralloc.h>
 #include <log/log.h>
 #include <media/hardware/HardwareAPI.h>
@@ -64,6 +66,28 @@ constexpr uint32_t kNativeUsageGpu = GRALLOC_USAGE_PRIVATE_0;
 // CbCr offset at 13
 constexpr int kGrallocMagic = 0x3141592;
 constexpr int kGrallocGpuMemory = 0x2;
+
+constexpr char kSdrOutputProperty[] = "persist.waydroid.video_sdr_output";
+
+// Where 8-bit frames go when ACodec renders to a surface
+enum class SdrOutput {
+    // RGBA on a host whose NV12 is unreliable, else NV12, in GPU memory
+    kAuto,
+    kRgba,
+    kNv12,
+    // YV12 in system memory, which the host writes from a CPU copy
+    kSystem,
+};
+
+SdrOutput readSdrOutput() {
+    char value[PROPERTY_VALUE_MAX];
+    property_get(kSdrOutputProperty, value, "auto");
+    if (!strcmp(value, "rgba")) return SdrOutput::kRgba;
+    if (!strcmp(value, "nv12")) return SdrOutput::kNv12;
+    if (!strcmp(value, "system")) return SdrOutput::kSystem;
+    if (strcmp(value, "auto")) ALOGW("%s: unknown value %s, using auto", kSdrOutputProperty, value);
+    return SdrOutput::kAuto;
+}
 
 // The private_handle_t ints of HANDLE if it is a buffer in GPU memory, which
 // cannot be locked, else null.
@@ -190,6 +214,9 @@ class WaydroidDecoder : public SoftVideoDecoderOMXComponent {
     // converts them for RGBA ones
     bool mGpuTargets = false;
     bool mRgbaTargets = false;
+    // the host's GPU misreads some NV12 buffers
+    bool mNv12Unreliable = false;
+    SdrOutput mSdrOutput = SdrOutput::kAuto;
     uint8_t *mShm = nullptr;
     size_t mShmSize = 0;
     const gralloc_module_t *mGralloc = nullptr;
@@ -256,6 +283,8 @@ bool WaydroidDecoder::connectHost(uint32_t codec) {
     }
     mGpuTargets = reply.flags & HWDEC_OPEN_GPU_TARGETS;
     mRgbaTargets = reply.flags & HWDEC_OPEN_RGBA_TARGETS;
+    mNv12Unreliable = reply.flags & HWDEC_OPEN_NV12_UNRELIABLE;
+    mSdrOutput = readSdrOutput();
     return true;
 }
 
@@ -508,8 +537,15 @@ OMX_COLOR_FORMATTYPE WaydroidDecoder::formatFor(const hwdec_reply &frame) const 
     return deep ? OMX_COLOR_FormatYUV420Planar16 : OMX_COLOR_FormatYUV420Planar;
 }
 
+// The format the property asks for, or the next one the host can write
 OMX_COLOR_FORMATTYPE WaydroidDecoder::nativeFormat() const {
-    return mRgbaTargets ? kNativeFormatRgba : mGpuTargets ? kNativeFormatGpu : kNativeFormat;
+    bool rgba = mSdrOutput == SdrOutput::kRgba ||
+                (mSdrOutput == SdrOutput::kAuto && mNv12Unreliable);
+    if (mSdrOutput != SdrOutput::kSystem) {
+        if (rgba && mRgbaTargets) return kNativeFormatRgba;
+        if (mGpuTargets) return kNativeFormatGpu;
+    }
+    return kNativeFormat;
 }
 
 void WaydroidDecoder::updateHdrStaticInfo(const hwdec_reply &frame) {

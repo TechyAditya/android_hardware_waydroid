@@ -840,7 +840,8 @@ handle_request(struct session *s, const struct hwdec_request *req)
       struct hwdec_reply reply = {
          .type = HWDEC_REPLY_OK,
          .flags = (s->gpu ? HWDEC_OPEN_GPU_TARGETS : 0) |
-                  (gpu_can_convert(s->gpu) ? HWDEC_OPEN_RGBA_TARGETS : 0),
+                  (gpu_can_convert(s->gpu) ? HWDEC_OPEN_RGBA_TARGETS : 0) |
+                  (gpu_nv12_unreliable(s->gpu) ? HWDEC_OPEN_NV12_UNRELIABLE : 0),
       };
       return send_reply(s, &reply);
    }

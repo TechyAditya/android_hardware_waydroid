@@ -87,6 +87,9 @@ enum hwdec_format {
  * or HWDEC_FORMAT_RGBA_GPU targets */
 #define HWDEC_OPEN_GPU_TARGETS (1u << 0)
 #define HWDEC_OPEN_RGBA_TARGETS (1u << 1)
+/* the host GPU (NVIDIA) misreads some NV12 dma-bufs that another device
+ * imports, so frames are best written as RGBA */
+#define HWDEC_OPEN_NV12_UNRELIABLE (1u << 2)
 
 /* the packet is codec configuration (csd), not a frame */
 #define HWDEC_PACKET_CONFIG (1u << 0)

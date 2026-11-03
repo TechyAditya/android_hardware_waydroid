@@ -22,6 +22,9 @@ void gpu_destroy(struct gpu_ctx *g);
 
 /* Whether G can write frames into RGBA buffers. */
 bool gpu_can_convert(const struct gpu_ctx *g);
+/* Whether G's GPU misreads some two-plane NV12 dma-bufs that another Vulkan
+ * device imports, as NVIDIA (615) does for Android's compositor. */
+bool gpu_nv12_unreliable(const struct gpu_ctx *g);
 
 /* Imports the NV12 dma-buf FD (not taken) of WIDTH x HEIGHT, laid out by
  * MODIFIER, with planes at OFFSET[0] and OFFSET[1] that share STRIDE. */
