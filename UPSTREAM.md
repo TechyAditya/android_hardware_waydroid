@@ -362,8 +362,8 @@ With an explicit layout, `vkGetImageMemoryRequirements` also returns less memory
 
 | Size | Modifier | CbCr plane offset | Explicit layout: requirement | Modifier list: requirement | dma-buf size | Explicit layout reads back |
 | --- | --- | --- | --- | --- | --- | --- |
-| 2560x16 | | 65536 | 61440 | 131072 | 131072 | correctly |
-| 2560x32 | | 131072 | 122880 | 196608 | 262144 | correctly |
+| 2560x16 | `0x0300000000606011` | 65536 | 61440 | 131072 | 131072 | correctly |
+| 2560x32 | `0x0300000000606012` | 131072 | 122880 | 196608 | 262144 | correctly |
 | 2560x40 | `0x0300000000606012` | 196608 | 245760 | 327680 | 327680 | wrong |
 | 2560x48 | `0x0300000000606013` | 196608 | 245760 | 327680 | 393216 | wrong |
 | 2560x64 | `0x0300000000606013` | 196608 | 245760 | 327680 | 393216 | wrong |
