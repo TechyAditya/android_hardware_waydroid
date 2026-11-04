@@ -316,7 +316,7 @@ On hold. `pr/gpu-memory-dmabuf` sends buffers flagged `PRIV_FLAGS_GPU_MEMORY` to
 
 ## 7. NVIDIA misreads two-plane NV12 imports
 
-Posted on 2026-11-04 as [forum thread 387942](https://forums.developer.nvidia.com/t/vulkan-some-nv12-dma-bufs-imported-as-two-plane-images-read-back-wrong-615-78-08/387942) in the Linux category, tagged `linux`, `linux-driver`, and `vulkan`, with the log from `sudo nvidia-bug-report.sh` attached.
+Posted on 2026-11-04 as [forum thread 387942](https://forums.developer.nvidia.com/t/vulkan-some-nv12-dma-bufs-imported-as-two-plane-images-read-back-wrong-615-78-08/387942) in the Linux category, tagged `linux`, `linux-driver`, and `vulkan`, with the log from `sudo nvidia-bug-report.sh` attached. The draft below is the post as edited on 2026-11-04 with the small-buffer results: paste it over the original. The edit adds `LIST=1` to the reproducer, the "Update: small buffers" section, and the last sentence of the second related report.
 
 Title: `Vulkan: some NV12 dma-bufs imported as two-plane images read back wrong (615.78.08)`
 
@@ -329,13 +329,15 @@ RTX 3060 Laptop GPU, driver 615.78.08, Linux 7.3, Arch Linux (CachyOS). GBM give
 
 ### Reproducer
 
-[nv12-import.c](https://github.com/TechyAditya/waydroid-venus/blob/master/hwdec/test/nv12-import.c) allocates 40 NV12 buffers with GBM, imports each into one Vulkan device, copies a pattern into both planes, copies it back, and compares.
+[nv12-import.c](https://github.com/TechyAditya/waydroid-venus/blob/master/hwdec/test/nv12-import.c) allocates 40 NV12 buffers with GBM, imports each into one Vulkan device, copies a pattern into both planes, copies it back, and compares. `SPLIT=1` imports each plane as its own image. `LIST=1` passes the modifier through `VkImageDrmFormatModifierListCreateInfoEXT` instead of `VkImageDrmFormatModifierExplicitCreateInfoEXT`, and prints any plane whose layout then differs from GBM's.
 
 ```sh
 cc -O2 -o nv12-import nv12-import.c $(pkg-config --cflags --libs gbm libdrm vulkan)
 ./nv12-import 1920 1080 40
 ./nv12-import 2560 1440 40
 SPLIT=1 ./nv12-import 1920 1080 40
+./nv12-import 2560 40 1
+LIST=1 ./nv12-import 2560 40 1
 ```
 
 ### Result
@@ -352,6 +354,22 @@ These leave the failing buffers where they are: dedicated or shared memory, impo
 
 These move them: the resolution, the allocation method, and the import order. With linear NV12 buffers allocated through Vulkan, 1920x1080 reads back correctly, but at 2560x1440 buffers 10 and 26 lose 75% of their chroma. The failures repeat every 16 buffers at 2560x1440 and every 32 at 1920x1080. If each import takes a power-of-two block of GPU address space, both periods are 128 MB.
 
+### Update: small buffers fail with an explicit layout only
+
+At 2560x40, 2560x48, and 2560x64, every buffer reads back wrong with an explicit layout, even when only one is allocated: 80% of the chroma is wrong. With a modifier list holding the same single modifier, the same buffers read back correctly, and `vkGetImageSubresourceLayout` returns the offsets and pitches that GBM reported. The 1920x1080 and 2560x1440 failures above happen with both.
+
+With an explicit layout, `vkGetImageMemoryRequirements` also returns less memory than with the list, and less than the CbCr plane needs. The pitch is 2560 for both planes:
+
+| Size | Modifier | CbCr plane offset | Explicit layout: requirement | Modifier list: requirement | dma-buf size | Explicit layout reads back |
+| --- | --- | --- | --- | --- | --- | --- |
+| 2560x16 | | 65536 | 61440 | 131072 | 131072 | correctly |
+| 2560x32 | | 131072 | 122880 | 196608 | 262144 | correctly |
+| 2560x40 | `0x0300000000606012` | 196608 | 245760 | 327680 | 327680 | wrong |
+| 2560x48 | `0x0300000000606013` | 196608 | 245760 | 327680 | 393216 | wrong |
+| 2560x64 | `0x0300000000606013` | 196608 | 245760 | 327680 | 393216 | wrong |
+
+The requirement ends before the CbCr plane at 16 and 32 rows, which read back correctly, and inside it at 40 to 64 rows, which do not. The memory allocated is always the whole dma-buf.
+
 ### Impact
 
 Waydroid's compositor reads Android's video buffers this way through Venus, so some frames show as solid green or without colour.
@@ -359,31 +377,5 @@ Waydroid's compositor reads Android's video buffers this way through Venus, so s
 ### Related reports
 
 - FFmpeg commit [bdc07f3](https://ffmpeg.org/pipermail/ffmpeg-cvslog/2025-March/147590.html) says NV12 images map into CUDA wrong when one memory object holds both planes, and that it was reported to NVIDIA. That is Vulkan export to CUDA, not dma-buf import, but the pattern is the same: two planes in one image fail, and separate planes work.
-- [Thread 371199](https://forums.developer.nvidia.com/t/nvidia-vulkan-vkimagedrmformatmodifierexplicitcreateinfoext-rejects-nv12-layouts-that-the-list-based-path-accepts/371199) reports that `vkCreateImage` rejects these NV12 buffers when the plane layout is given explicitly. Here the import succeeds and the data is wrong, with an explicit layout and with a modifier list.
-````
-
-### Follow-up reply (not posted)
-
-The updated reproducer (`0bf7917`) adds `LIST=1`, which passes the modifier through `VkImageDrmFormatModifierListCreateInfoEXT` instead of an explicit layout. Post this as a reply to the thread once it is checked. It does not change the Waydroid stack, which imports each plane as its own image, and video frames are never this small.
-
-````markdown
-A smaller case, with an updated [nv12-import.c](https://github.com/TechyAditya/waydroid-venus/blob/master/hwdec/test/nv12-import.c). `LIST=1` passes the modifier through `VkImageDrmFormatModifierListCreateInfoEXT` instead of `VkImageDrmFormatModifierExplicitCreateInfoEXT`:
-
-```sh
-./nv12-import 2560 40 1
-LIST=1 ./nv12-import 2560 40 1
-```
-
-At 2560x40, 2560x48, and 2560x64, every buffer reads back wrong with the explicit layout, even when only one is allocated: 80% of the chroma is wrong. With a modifier list holding the same single modifier, the same buffers read back correctly, and `vkGetImageSubresourceLayout` returns the plane offsets and pitches that GBM reported. GBM gives these buffers modifier `0x0300000000606012` at 40 rows and `0x0300000000606013` at 48 and 64.
-
-With the explicit layout, `vkGetImageMemoryRequirements` also returns less memory than with the list:
-
-| Size | Explicit layout | Modifier list | dma-buf size | Explicit layout reads back |
-| --- | --- | --- | --- | --- |
-| 2560x16 | 61440 | 131072 or more | 131072 | correctly |
-| 2560x32 | 122880 | 196608 | 262144 | correctly |
-| 2560x40 | 245760 | 327680 or more | 327680 | wrong |
-| 2560x48 | 245760 | 327680 | 393216 | wrong |
-
-The smaller requirement at 16 and 32 rows still reads back correctly, so it does not explain the failures alone. The 1920x1080 and 2560x1440 failures in my first post happen with both the explicit layout and the modifier list.
+- [Thread 371199](https://forums.developer.nvidia.com/t/nvidia-vulkan-vkimagedrmformatmodifierexplicitcreateinfoext-rejects-nv12-layouts-that-the-list-based-path-accepts/371199) reports that `vkCreateImage` rejects these NV12 buffers when the plane layout is given explicitly. Here the import succeeds and the data is wrong: at 1920x1080 and 2560x1440 with an explicit layout and with a modifier list, and at the small sizes above with an explicit layout only.
 ````
