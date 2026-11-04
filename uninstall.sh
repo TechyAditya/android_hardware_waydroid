@@ -12,13 +12,14 @@ if waydroid status 2> /dev/null | grep -q $'^Container:\tRUNNING'; then
    waydroid shell -- sh -c 'settings delete system min_refresh_rate; settings delete system peak_refresh_rate' \
       > /dev/null 2>&1 || true
 fi
-if [ -e "$hook" ]; then
-   case "$(sed -n 2p "$hook")" in
+for file in "$hook" /usr/local/bin/waydroid-app-displays; do
+   [ -e "$file" ] || continue
+   case "$(sed -n 2p "$file")" in
       "# managed-by: waydroid-app-displays" | \
       "# Installed ahead of /usr/bin/waydroid: \`waydroid app launch PACKAGE\`, which Waydroid's")
-         rm -f "$hook" ;;
+         rm -f "$file" ;;
    esac
-fi
+done
 rm -rf /usr/local/lib/waydroid-app-displays
 rm -f /var/lib/waydroid/overlay/vendor/etc/init/waydroid-app-displays.rc
 rm -rf "$home/.local/share/waydroid/data/waydroid-app-displays"

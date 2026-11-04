@@ -3,6 +3,6 @@
 # Installed ahead of /usr/bin/waydroid: `waydroid app launch PACKAGE`, which Waydroid's
 # desktop entries run, opens the app in its own window. Everything else is unchanged.
 if [ "$#" -eq 3 ] && [ "$1" = app ] && [ "$2" = launch ]; then
-   exec /usr/local/lib/waydroid-app-displays/launch.py "$3"
+   exec /usr/local/bin/waydroid-app-displays launch --quiet --stock-fallback "$3"
 fi
 exec /usr/bin/waydroid "$@"

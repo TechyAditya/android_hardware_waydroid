@@ -29,6 +29,7 @@
 #include "fractional-scale-v1-client-protocol.h"
 #include "linux-dmabuf-v1-client-protocol.h"
 #include "viewporter-client-protocol.h"
+#include "xdg-output-unstable-v1-client-protocol.h"
 #include "xdg-shell-client-protocol.h"
 
 Java java;
@@ -48,6 +49,13 @@ namespace {
 
 constexpr int kImages = 4;
 constexpr int kDefaultWidth = 1280, kDefaultHeight = 800;
+// A hidden display launched without a size is a phone, about 393 dp wide.
+constexpr int kPhoneWidth = 1080, kPhoneHeight = 2340, kPhoneDpi = 440;
+constexpr int kMinDisplaySize = 64, kMaxDisplaySize = 8192;
+constexpr int kMinDpi = 72, kMaxDpi = 1200;
+// A fixed-size window larger than this share of the biggest monitor is shrunk to fit;
+// the display keeps its size and the compositor scales it down.
+constexpr double kMaxMonitorShare = 0.9;
 constexpr int64_t kTaskCheckDelayMs = 250;
 constexpr int64_t kTaskPollMs = 3000;
 constexpr int64_t kLaunchTimeoutMs = 20000;
@@ -73,6 +81,9 @@ using GetNativeHandle = const native_handle_layout *(*)(const AHardwareBuffer *)
 
 struct Output {
     int32_t refresh = 0, pending = 0;
+    int32_t width = 0, height = 0, pending_w = 0, pending_h = 0; // current mode in pixels
+    int32_t logical_w = 0, logical_h = 0; // from xdg-output, if the compositor has it
+    zxdg_output_v1 *xdg = nullptr;
 };
 
 struct {
@@ -84,6 +95,7 @@ struct {
     wp_viewporter *viewporter = nullptr;
     wp_fractional_scale_manager_v1 *fractional = nullptr;
     zwp_linux_dmabuf_v1 *dmabuf = nullptr;
+    zxdg_output_manager_v1 *xdg_outputs = nullptr;
     bool shm_xbgr = false;
     wl_buffer *placeholder = nullptr;
 
@@ -287,9 +299,28 @@ Reader *reader_by_gen(Window *w, uint32_t gen) {
     return nullptr;
 }
 
+// A hidden display's frames go straight back to it, so it never runs out of buffers.
+void drop_frames(Window *w) {
+    Reader *r = current_reader(w);
+    if (!r)
+        return;
+    AImage *image = nullptr;
+    int fence = -1;
+    while (AImageReader_acquireNextImageAsync(r->reader, &image, &fence) == AMEDIA_OK && image) {
+        AImage_deleteAsync(image, fence);
+        image = nullptr;
+    }
+}
+
 void try_acquire(Window *w) {
     if (w->closing)
         return;
+    // A hidden window shown in a window keeps rendering before the compositor's first configure,
+    // when the surface can't take a buffer yet.
+    if (w->hidden || !w->configured) {
+        drop_frames(w);
+        return;
+    }
     if (w->pending_image) {
         w->frame_waiting = true;
         return;
@@ -359,14 +390,64 @@ int scale_of(const Window *w) {
 
 void target_size(const Window *w, int *pw, int *ph, int *dpi) {
     int s = scale_of(w);
-    *pw = std::max(1, int(std::lround(w->width * s / 120.0)));
-    *ph = std::max(1, int(std::lround(w->height * s / 120.0)));
-    *dpi = g.base_scale120 ? int(std::lround(double(g.density) * s / g.base_scale120)) : g.density;
+    if (w->fixed_w) {
+        *pw = w->fixed_w;
+        *ph = w->fixed_h;
+    } else {
+        *pw = std::max(1, int(std::lround(w->width * s / 120.0)));
+        *ph = std::max(1, int(std::lround(w->height * s / 120.0)));
+    }
+    if (w->fixed_dpi)
+        *dpi = w->fixed_dpi;
+    else
+        *dpi = g.base_scale120 ? int(std::lround(double(g.density) * s / g.base_scale120)) : g.density;
+}
+
+// Asks the compositor for a window that shows a fixed-size display at one display pixel per
+// screen pixel, or smaller if that doesn't fit on the biggest monitor. A window whose minimum
+// and maximum sizes match floats in tiling compositors. A window without a fixed size gets
+// no limits. Takes effect on the next commit.
+void update_size_hints(Window *w) {
+    if (!w->toplevel)
+        return;
+    if (!w->fixed_w) {
+        if (w->hint_w) {
+            w->hint_w = w->hint_h = 0;
+            xdg_toplevel_set_min_size(w->toplevel, 0, 0);
+            xdg_toplevel_set_max_size(w->toplevel, 0, 0);
+        }
+        return;
+    }
+    const Output *best = nullptr;
+    for (auto &[o, out] : g.outputs)
+        if (!best || int64_t(out.width) * out.height > int64_t(best->width) * best->height)
+            best = &out;
+    // Before the window is mapped it has no scale of its own, so the first size asked for
+    // uses the monitor's: its pixels per logical pixel.
+    double s = scale_of(w) / 120.0;
+    if (!w->scale120 && best && best->logical_w > 0)
+        s = double(std::max(best->width, best->height)) / std::max(best->logical_w, best->logical_h);
+    double lw = w->fixed_w / s, lh = w->fixed_h / s;
+    if (best && best->width > 0) {
+        double mw = best->logical_w > 0 ? best->logical_w : best->width / s;
+        double mh = best->logical_h > 0 ? best->logical_h : best->height / s;
+        double fit = std::min({1.0, kMaxMonitorShare * mw / lw, kMaxMonitorShare * mh / lh});
+        lw *= fit;
+        lh *= fit;
+    }
+    w->hint_w = std::max(1, int(std::lround(lw)));
+    w->hint_h = std::max(1, int(std::lround(lh)));
+    xdg_toplevel_set_min_size(w->toplevel, w->hint_w, w->hint_h);
+    xdg_toplevel_set_max_size(w->toplevel, w->hint_w, w->hint_h);
 }
 
 void start_display(Window *w) {
     if (w->closing)
         return;
+    if (w->display) {
+        schedule_resize(w, true);
+        return;
+    }
     int pw, ph, dpi;
     target_size(w, &pw, &ph, &dpi);
     Reader *r = new_reader(w, pw, ph);
@@ -484,6 +565,10 @@ void fractional_preferred_scale(void *data, wp_fractional_scale_v1 *, uint32_t s
         g.base_scale120 = int(scale);
     g.last_scale120 = int(scale);
     w->scale120 = int(scale);
+    if (w->fixed_w) {
+        update_size_hints(w);
+        wl_surface_commit(w->surface);
+    }
     if (w->start_pending) {
         w->start_pending = false;
         start_display(w);
@@ -516,8 +601,10 @@ void xsurface_configure(void *data, xdg_surface *xs, uint32_t serial) {
     Window *w = window_by_id(uint32_t(uintptr_t(data)));
     if (!w)
         return;
-    int width = w->pending_w > 0 ? w->pending_w : (w->width > 0 ? w->width : kDefaultWidth);
-    int height = w->pending_h > 0 ? w->pending_h : (w->height > 0 ? w->height : kDefaultHeight);
+    int fallback_w = w->hint_w ? w->hint_w : (w->width > 0 ? w->width : kDefaultWidth);
+    int fallback_h = w->hint_h ? w->hint_h : (w->height > 0 ? w->height : kDefaultHeight);
+    int width = w->pending_w > 0 ? w->pending_w : fallback_w;
+    int height = w->pending_h > 0 ? w->pending_h : fallback_h;
     bool first = !w->configured;
     w->configured = true;
     w->width = width;
@@ -585,12 +672,18 @@ const wl_surface_listener surface_listener = {surface_enter, surface_leave};
 
 void output_geometry(void *, wl_output *, int32_t, int32_t, int32_t, int32_t, int32_t, const char *, const char *,
         int32_t) {}
-void output_mode(void *, wl_output *output, uint32_t flags, int32_t, int32_t, int32_t refresh) {
-    if (flags & WL_OUTPUT_MODE_CURRENT)
-        g.outputs[output].pending = refresh;
+void output_mode(void *, wl_output *output, uint32_t flags, int32_t width, int32_t height, int32_t refresh) {
+    if (flags & WL_OUTPUT_MODE_CURRENT) {
+        Output &o = g.outputs[output];
+        o.pending = refresh;
+        o.pending_w = width;
+        o.pending_h = height;
+    }
 }
 void output_done(void *, wl_output *output) {
     Output &o = g.outputs[output];
+    o.width = o.pending_w;
+    o.height = o.pending_h;
     if (o.refresh != o.pending) {
         o.refresh = o.pending;
         refresh_changed();
@@ -599,11 +692,33 @@ void output_done(void *, wl_output *output) {
 void output_scale(void *, wl_output *, int32_t) {}
 const wl_output_listener output_listener = {output_geometry, output_mode, output_done, output_scale};
 
+void xdg_output_logical_position(void *, zxdg_output_v1 *, int32_t, int32_t) {}
+void xdg_output_logical_size(void *data, zxdg_output_v1 *, int32_t width, int32_t height) {
+    if (auto it = g.outputs.find(static_cast<wl_output *>(data)); it != g.outputs.end()) {
+        it->second.logical_w = width;
+        it->second.logical_h = height;
+    }
+}
+void xdg_output_done(void *, zxdg_output_v1 *) {}
+void xdg_output_name(void *, zxdg_output_v1 *, const char *) {}
+void xdg_output_description(void *, zxdg_output_v1 *, const char *) {}
+const zxdg_output_v1_listener xdg_output_listener = {xdg_output_logical_position, xdg_output_logical_size,
+        xdg_output_done, xdg_output_name, xdg_output_description};
+
+void watch_logical_size(wl_output *o) {
+    Output &out = g.outputs[o];
+    if (!g.xdg_outputs || out.xdg)
+        return;
+    out.xdg = zxdg_output_manager_v1_get_xdg_output(g.xdg_outputs, o);
+    zxdg_output_v1_add_listener(out.xdg, &xdg_output_listener, o);
+}
+
 void bind_output(wl_registry *registry, uint32_t name, uint32_t version) {
     auto *o = static_cast<wl_output *>(wl_registry_bind(registry, name, &wl_output_interface, std::min(version, 3u)));
     wl_output_add_listener(o, &output_listener, nullptr);
     g.outputs[o];
     g.output_names[name] = o;
+    watch_logical_size(o);
 }
 
 void remove_output(uint32_t name) {
@@ -612,6 +727,8 @@ void remove_output(uint32_t name) {
         return;
     wl_output *o = it->second;
     g.output_names.erase(it);
+    if (auto out = g.outputs.find(o); out != g.outputs.end() && out->second.xdg)
+        zxdg_output_v1_destroy(out->second.xdg);
     g.outputs.erase(o);
     for (auto &[id, w] : g.windows)
         w->outputs.erase(o);
@@ -622,11 +739,28 @@ void remove_output(uint32_t name) {
     refresh_changed();
 }
 
-Window *create_window(const std::string &pkg, const std::string &title) {
-    auto w = std::make_unique<Window>();
-    w->id = g.next_window++;
-    w->pkg = pkg;
-    w->title = title.empty() ? pkg : title;
+struct LaunchOptions {
+    int width = 0, height = 0, dpi = 0;
+    bool hidden = false;
+};
+
+// Each launch's options are the whole setting: what a launch leaves out goes back to following
+// the window and the system's scale, or for a hidden window to a phone.
+void set_options(Window *w, const LaunchOptions &o) {
+    w->fixed_w = o.width;
+    w->fixed_h = o.height;
+    w->fixed_dpi = o.dpi;
+    if (w->hidden && !w->fixed_w) {
+        w->fixed_w = kPhoneWidth;
+        w->fixed_h = kPhoneHeight;
+        if (!w->fixed_dpi)
+            w->fixed_dpi = kPhoneDpi;
+    }
+}
+
+// Gives a window its Wayland surface. A hidden window being shown keeps its display, which
+// start_display() then resizes to the window.
+void create_surface(Window *w) {
     void *tag = reinterpret_cast<void *>(uintptr_t(w->id));
 
     w->surface = wl_compositor_create_surface(g.compositor);
@@ -640,13 +774,45 @@ Window *create_window(const std::string &pkg, const std::string &title) {
     xdg_surface_add_listener(w->xsurface, &xsurface_listener, tag);
     w->toplevel = xdg_surface_get_toplevel(w->xsurface);
     xdg_toplevel_add_listener(w->toplevel, &toplevel_listener, tag);
-    xdg_toplevel_set_app_id(w->toplevel, ("waydroid." + pkg).c_str());
+    xdg_toplevel_set_app_id(w->toplevel, ("waydroid." + w->pkg).c_str());
     xdg_toplevel_set_title(w->toplevel, w->title.c_str());
+    update_size_hints(w);
     wl_surface_commit(w->surface);
+}
 
+Window *create_window(const std::string &pkg, const std::string &title, const LaunchOptions &opts) {
+    auto w = std::make_unique<Window>();
+    w->id = g.next_window++;
+    w->pkg = pkg;
+    w->title = title.empty() ? pkg : title;
+    w->hidden = opts.hidden;
+    set_options(w.get(), opts);
     Window *raw = w.get();
     g.windows[raw->id] = std::move(w);
+    if (raw->hidden)
+        start_display(raw);
+    else
+        create_surface(raw);
     return raw;
+}
+
+// Applies a launch's options to an open window, showing it if it was hidden.
+void relaunch_with(Window *w, const std::string &title, const LaunchOptions &opts) {
+    if (w->hidden && !opts.hidden) {
+        ALOGI("%s: showing display %d in a window", w->pkg.c_str(), w->display_id);
+        w->hidden = false;
+        if (!title.empty())
+            w->title = title;
+        set_options(w, opts);
+        create_surface(w);
+        return;
+    }
+    set_options(w, opts);
+    if (w->surface) {
+        update_size_hints(w);
+        wl_surface_commit(w->surface);
+    }
+    schedule_resize(w, true);
 }
 
 void destroy_window(Window *w) {
@@ -663,17 +829,21 @@ void destroy_window(Window *w) {
         w->display = nullptr;
     }
     // Detach first, so no buffer is destroyed while it is still the surface's content.
-    wl_surface_attach(w->surface, nullptr, 0, 0);
-    wl_surface_commit(w->surface);
+    if (w->surface) {
+        wl_surface_attach(w->surface, nullptr, 0, 0);
+        wl_surface_commit(w->surface);
+    }
     for (auto &r : w->readers)
         free_reader(w, r.get());
     w->readers.clear();
     if (w->fractional)
         wp_fractional_scale_v1_destroy(w->fractional);
-    wp_viewport_destroy(w->viewport);
-    xdg_toplevel_destroy(w->toplevel);
-    xdg_surface_destroy(w->xsurface);
-    wl_surface_destroy(w->surface);
+    if (w->surface) {
+        wp_viewport_destroy(w->viewport);
+        xdg_toplevel_destroy(w->toplevel);
+        xdg_surface_destroy(w->xsurface);
+        wl_surface_destroy(w->surface);
+    }
     if (!w->outputs.empty())
         refresh_changed();
     g.windows.erase(w->id);
@@ -710,26 +880,99 @@ bool valid_pkg(const std::string &s) {
     return true;
 }
 
-std::string handle_command(const std::string &line) {
+bool parse_int(const std::string &s, int lo, int hi, int *out) {
+    if (s.empty() || s.size() > 5 || !std::all_of(s.begin(), s.end(), ::isdigit))
+        return false;
+    int v = std::stoi(s);
+    if (v < lo || v > hi)
+        return false;
+    *out = v;
+    return true;
+}
+
+// Reads `size=WxH`, `dpi=N` and `hidden=1` from the front of `rest`; what follows is the title.
+// Returns an error message, or "" if the options are valid.
+std::string parse_options(std::string &rest, LaunchOptions *o) {
+    for (;;) {
+        std::string token = rest.substr(0, rest.find(' '));
+        size_t eq = token.find('=');
+        std::string key = token.substr(0, eq), value = eq == std::string::npos ? "" : token.substr(eq + 1);
+        if (key == "size" && eq != std::string::npos) {
+            size_t x = value.find('x');
+            if (x == std::string::npos ||
+                    !parse_int(value.substr(0, x), kMinDisplaySize, kMaxDisplaySize, &o->width) ||
+                    !parse_int(value.substr(x + 1), kMinDisplaySize, kMaxDisplaySize, &o->height))
+                return "size must be WIDTHxHEIGHT, each " + std::to_string(kMinDisplaySize) + " to " +
+                       std::to_string(kMaxDisplaySize);
+        } else if (key == "dpi" && eq != std::string::npos) {
+            if (!parse_int(value, kMinDpi, kMaxDpi, &o->dpi))
+                return "dpi must be " + std::to_string(kMinDpi) + " to " + std::to_string(kMaxDpi);
+        } else if (key == "hidden" && eq != std::string::npos) {
+            o->hidden = value == "1";
+        } else {
+            return "";
+        }
+        rest = rest.size() > token.size() ? rest.substr(token.size() + 1) : "";
+    }
+}
+
+void relaunch(Window *w) {
+    if (w->display_id < 0)
+        return;
+    jstring jpkg = java.env->NewStringUTF(w->pkg.c_str());
+    java.env->CallBooleanMethod(java.bridge, java.launch, jpkg, w->display_id);
+    java.env->DeleteLocalRef(jpkg);
+    java.check("launch");
+}
+
+// Returns the reply, or "" if the reply is left to another thread, which got its own copy of fd.
+std::string handle_command(const std::string &line, int fd) {
     std::string cmd = line.substr(0, line.find(' '));
     std::string rest = line.size() > cmd.size() ? line.substr(cmd.size() + 1) : "";
     std::string pkg = rest.substr(0, rest.find(' '));
-    std::string title = rest.size() > pkg.size() ? rest.substr(pkg.size() + 1) : "";
+    rest = rest.size() > pkg.size() ? rest.substr(pkg.size() + 1) : "";
 
     if (cmd == "launch") {
         if (!valid_pkg(pkg))
             return "error invalid package\n";
+        LaunchOptions opts;
+        std::string err = parse_options(rest, &opts);
+        if (!err.empty())
+            return "error " + err + "\n";
         if (Window *w = window_for_pkg(pkg)) {
-            if (w->display_id >= 0) {
-                jstring jpkg = java.env->NewStringUTF(pkg.c_str());
-                java.env->CallBooleanMethod(java.bridge, java.launch, jpkg, w->display_id);
-                java.env->DeleteLocalRef(jpkg);
-                java.check("launch");
-            }
+            if (opts.hidden && !w->hidden)
+                return "error " + pkg + " is already open in a window; close it first\n";
+            relaunch_with(w, rest, opts);
+            relaunch(w);
             return "ok existing\n";
         }
-        create_window(pkg, title);
+        Window *w = create_window(pkg, rest, opts);
+        if (w->closing)
+            return "error can't start " + pkg + "; see `adb logcat -s waydroid-app-displays`\n";
         return "ok\n";
+    }
+    if (cmd == "screenshot") {
+        Window *w = window_for_pkg(pkg);
+        if (!w || w->display_id < 0)
+            return "error " + pkg + " has no display\n";
+        int copy = fcntl(fd, F_DUPFD_CLOEXEC, 0);
+        if (copy < 0)
+            return std::string("error ") + strerror(errno) + "\n";
+        jstring jpkg = java.env->NewStringUTF(pkg.c_str());
+        java.env->CallVoidMethod(java.bridge, java.screenshot, jpkg, w->display_id, w->display_w, w->display_h, copy);
+        java.env->DeleteLocalRef(jpkg);
+        if (!java.check("screenshot")) {
+            close(copy);
+            return "error the capture didn't start\n";
+        }
+        return "";
+    }
+    if (cmd == "focus") {
+        Window *w = window_for_pkg(pkg);
+        if (!w || w->display_id < 0)
+            return "error " + pkg + " has no display\n";
+        java.env->CallVoidMethod(java.bridge, java.focusDisplay, w->display_id);
+        return java.check("focusDisplay") ? "ok\n" : "error focusing failed\n";
     }
     if (cmd == "close") {
         if (!valid_pkg(pkg))
@@ -744,7 +987,10 @@ std::string handle_command(const std::string &line) {
         std::string out;
         for (auto &[id, w] : g.windows)
             out += w->pkg + " display=" + std::to_string(w->display_id) + " " + std::to_string(w->display_w) +
-                   "x" + std::to_string(w->display_h) + " dpi=" + std::to_string(w->dpi) + "\n";
+                   "x" + std::to_string(w->display_h) + " dpi=" + std::to_string(w->dpi) +
+                   " hidden=" + std::to_string(w->hidden) + " window=" + std::to_string(w->width) + "x" +
+                   std::to_string(w->height) + " fixed=" + std::to_string(w->fixed_w) + "x" +
+                   std::to_string(w->fixed_h) + " fixed_dpi=" + std::to_string(w->fixed_dpi) + "\n";
         return out.empty() ? "\n" : out;
     }
     if (cmd == "state") {
@@ -788,7 +1034,7 @@ void serve_control() {
         line.append(buf, size_t(n));
     }
     line = line.substr(0, line.find('\n'));
-    std::string reply = handle_command(line);
+    std::string reply = handle_command(line, fd);
     for (size_t off = 0; off < reply.size();) {
         ssize_t n = write(fd, reply.data() + off, reply.size() - off);
         if (n <= 0)
@@ -857,6 +1103,10 @@ void registry_global(void *, wl_registry *registry, uint32_t name, const char *i
         input_bind_seat(registry, name, version);
     } else if (!strcmp(iface, wl_output_interface.name)) {
         bind_output(registry, name, version);
+    } else if (!strcmp(iface, zxdg_output_manager_v1_interface.name)) {
+        g.xdg_outputs = static_cast<zxdg_output_manager_v1 *>(bind(&zxdg_output_manager_v1_interface, 3));
+        for (auto &[o, out] : g.outputs)
+            watch_logical_size(o);
     }
 }
 void registry_remove(void *, wl_registry *, uint32_t name) {
@@ -1041,6 +1291,7 @@ void disconnect(const char *control_path) {
     g.viewporter = nullptr;
     g.fractional = nullptr;
     g.dmabuf = nullptr;
+    g.xdg_outputs = nullptr;
     g.placeholder = nullptr;
     g.shm_xbgr = false;
     g.outputs.clear();
@@ -1164,6 +1415,7 @@ extern "C" JNIEXPORT jint JNICALL Java_waydroid_appdisplay_Native_run(JNIEnv *en
             {&java.injectMotion, "injectMotion", "(IIIIII[I[FFFJ)V"},
             {&java.injectKey, "injectKey", "(IIIIIJ)V"},
             {&java.setRefreshRate, "setRefreshRate", "(I)V"},
+            {&java.screenshot, "screenshot", "(Ljava/lang/String;IIII)V"},
     };
     for (auto &m : methods) {
         *m.id = env->GetMethodID(c, m.name, m.sig);

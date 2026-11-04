@@ -1,0 +1,371 @@
+#!/usr/bin/env python3
+# managed-by: waydroid-app-displays
+"""Opens Android apps in their own windows and Android displays, and shows how to debug them.
+
+`launch` prints, once, the commands that capture, record, drive and inspect the app's display.
+`--hidden` runs the app on a display with no window, for agents and scripts.
+
+Launching an open app again applies that launch's options, and what it leaves out goes back to
+the default. So a plain launch, such as the app's start menu entry, shows a hidden app in a
+normal window, and its display follows the window and the system's scale again.
+"""
+
+import argparse
+import json
+import os
+import re
+import shlex
+import shutil
+import socket
+import subprocess
+import sys
+import time
+
+WAYDROID = "/usr/bin/waydroid"
+DATA_HOME = os.environ.get("XDG_DATA_HOME") or os.path.expanduser("~/.local/share")
+# Android's /data is this host directory.
+ANDROID_DATA = os.path.join(DATA_HOME, "waydroid", "data")
+SOCKET = os.path.join(ANDROID_DATA, "waydroid-app-displays", "control.sock")
+SHOTS = "/tmp/waydroid-app-displays"
+# Waydroid needs about 20 s to boot Android; the service starts after that.
+START_TIMEOUT = 90
+# A window gets its display once the compositor has sized and scaled it.
+DISPLAY_TIMEOUT = 15
+# Longer than the service's default resize_interval_ms of 500, which delays a second resize.
+SETTLE_INTERVAL = 0.7
+SETTLE_TIMEOUT = 3
+SIZE_RE = re.compile(r"^[0-9]+x[0-9]+$")
+LIST_RE = re.compile(r"^(\S+) display=(-?\d+) (\d+)x(\d+) dpi=(\d+)(?: hidden=(\d))?(?: window=(\d+)x(\d+))?"
+                     r"(?: fixed=(\d+)x(\d+) fixed_dpi=(\d+))?")
+
+
+class Fail(Exception):
+    pass
+
+
+def label(pkg):
+    path = os.path.join(DATA_HOME, "applications", f"waydroid.{pkg}.desktop")
+    try:
+        with open(path) as f:
+            for line in f:
+                if line.startswith("Name="):
+                    return line[5:].strip()
+    except OSError:
+        pass
+    return ""
+
+
+def request(line, timeout=5):
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
+        s.settimeout(timeout)
+        s.connect(SOCKET)
+        s.sendall(line.encode() + b"\n")
+        chunks = []
+        while chunk := s.recv(65536):
+            chunks.append(chunk)
+    return b"".join(chunks).decode().strip()
+
+
+def checked(line, timeout=5):
+    try:
+        reply = request(line, timeout)
+    except OSError as e:
+        raise Fail(f"the service isn't reachable ({e}); is Waydroid running?")
+    if reply.startswith("error"):
+        raise Fail(reply[len("error"):].strip())
+    return reply
+
+
+def waydroid_status():
+    return subprocess.run([WAYDROID, "status"], capture_output=True, text=True).stdout
+
+
+def session_running():
+    return "Session:\tRUNNING" in waydroid_status()
+
+
+def stock(pkg):
+    os.execv(WAYDROID, [WAYDROID, "app", "launch", pkg])
+
+
+def windows():
+    out = []
+    for line in checked("list").splitlines():
+        m = LIST_RE.match(line)
+        if m:
+            out.append({
+                "package": m[1], "display_id": int(m[2]), "width": int(m[3]), "height": int(m[4]),
+                "dpi": int(m[5]), "hidden": m[6] == "1",
+                "window": [int(m[7]), int(m[8])] if m[7] and m[6] != "1" else None,
+                # What the launch fixed; null where the display follows the window and system scale
+                "fixed_size": [int(m[9]), int(m[10])] if m[9] and m[9] != "0" else None,
+                "fixed_dpi": int(m[11]) if m[11] and m[11] != "0" else None,
+            })
+    return out
+
+
+def window(pkg):
+    for w in windows():
+        if w["package"] == pkg:
+            return w
+    return None
+
+
+def adb_serial():
+    """Waydroid's adb serial, connecting adb to it if needed; None without adb or an IP address."""
+    m = re.search(r"^IP address:\s*(\S+)", waydroid_status(), re.M)
+    if not m or not shutil.which("adb"):
+        return None
+    serial = f"{m[1]}:5555"
+    devices = subprocess.run(["adb", "devices"], capture_output=True, text=True).stdout
+    if not re.search(rf"^{re.escape(serial)}\s+device$", devices, re.M):
+        subprocess.run(["adb", "connect", serial], capture_output=True, timeout=10)
+    return serial
+
+
+def commands(w, serial):
+    """The debugging commands for a window's display, as (section, [(name, command, note)])."""
+    pkg, d, width, height = w["package"], w["display_id"], w["width"], w["height"]
+    q = shlex.quote(pkg)
+    adb = f"adb -s {serial}" if serial else "adb"
+    scrcpy = f"scrcpy -s {serial}" if serial else "scrcpy"
+    me = "waydroid-app-displays"
+    relaunch = f"{me} launch {q}"
+    if w["fixed_size"]:
+        relaunch += f" --size {w['fixed_size'][0]}x{w['fixed_size'][1]}"
+    if w["fixed_dpi"]:
+        relaunch += f" --dpi {w['fixed_dpi']}"
+    if w["hidden"]:
+        relaunch += " --hidden"
+    see = [("screenshot", f"{me} screenshot {q} -o /tmp/{pkg}.png", "PNG at full display resolution; -o - writes to stdout")]
+    if w["hidden"]:
+        see.append(("live view", f"{scrcpy} --display-id={d} --no-audio --window-title={q}",
+                    "a window you can also click and type into; closing it leaves the app running"))
+    see.append(("record", f"{scrcpy} --display-id={d} --no-window --no-audio --no-control "
+                f"--record=/tmp/{pkg}.mp4 --time-limit=10", "H.264 MP4; Ctrl-C stops early"))
+    return [
+        ("See it", see),
+        (f"Control it (display pixels, {width}x{height})", [
+            ("tap", f"{adb} shell input -d {d} tap {width // 2} {height // 2}", ""),
+            ("swipe", f"{adb} shell input -d {d} swipe {width // 2} {height * 3 // 4} {width // 2} {height // 4} 300",
+             "scrolls down"),
+            ("type", f"{adb} shell input -d {d} text 'hello%sworld'", "%s is a space; tap a text field first"),
+            ("key", f"{adb} shell input -d {d} keyevent KEYCODE_BACK", "also KEYCODE_ENTER, KEYCODE_TAB"),
+        ]),
+        ("Inspect it", [
+            ("activities", f"{adb} shell dumpsys activity activities | grep -A12 'Display #{d} '", ""),
+            ("logs", f"{adb} logcat --pid=\"$({adb} shell pidof -s {q})\"", "while the app runs"),
+        ]),
+        ("Manage it", [
+            *([("show", f"{me} launch {q}", "opens it in a normal window at the system's size and density; "
+                "so does its start menu entry")] if w["hidden"] else []),
+            ("relaunch", relaunch, "reuses the display if it's still open"),
+            ("info", f"{me} info {q}", "prints these commands again"),
+            ("close", f"{me} close {q}", ""),
+        ]),
+    ]
+
+
+def print_info(w, serial, as_json):
+    sections = commands(w, serial)
+    if as_json:
+        print(json.dumps({
+            **w, "serial": serial,
+            "commands": {name: cmd for _, rows in sections for name, cmd, _ in rows},
+        }, indent=2))
+        return
+    where = "hidden, no window" if w["hidden"] else "in a window"
+    print(f"{w['package']}: Android display {w['display_id']}, {w['width']}x{w['height']} px at {w['dpi']} dpi ({where})")
+    print(f"adb serial: {serial}" if serial else "adb serial: unknown (adb missing or Waydroid has no IP address)")
+    print("The display id changes when the app is closed and launched again.")
+    for title, rows in sections:
+        print(f"\n{title}")
+        width = max(len(name) for name, _, _ in rows)
+        for name, cmd, note in rows:
+            print(f"  {name:<{width}}  {cmd}")
+            if note:
+                print(f"  {'':<{width}}  # {note}")
+
+
+def wait_for_display(pkg):
+    deadline = time.monotonic() + DISPLAY_TIMEOUT
+    while True:
+        w = window(pkg)
+        if w is None:
+            raise Fail(f"{pkg} closed right after launch; it may have no launcher activity or have crashed "
+                       f"(adb logcat -s waydroid-app-displays)")
+        if w["display_id"] >= 0:
+            return w
+        if time.monotonic() > deadline:
+            raise Fail(f"{pkg} got no display within {DISPLAY_TIMEOUT} s")
+        time.sleep(0.1)
+
+
+def set_floating(pkg, floating):
+    """Floats or tiles the app's window in Hyprland. A fixed-size window floats when it opens,
+    but an open window keeps its state when the launch options change."""
+    if not os.environ.get("HYPRLAND_INSTANCE_SIGNATURE") or not shutil.which("hyprctl"):
+        return
+    match = "class:^" + re.escape(f"waydroid.{pkg}") + "$"
+    action = "enable" if floating else "disable"
+    lua = f'hl.dsp.window.float({{ action = "{action}", window = "{match.replace(chr(92), chr(92) * 2)}" }})'
+    out = subprocess.run(["hyprctl", "dispatch", lua], capture_output=True, text=True).stdout
+    if out.strip() != "ok":  # Hyprland without a Lua config
+        subprocess.run(["hyprctl", "dispatch", "setfloating" if floating else "settiled", match],
+                       capture_output=True)
+
+
+def cmd_launch(args):
+    pkg = args.package
+    opts = []
+    if args.size:
+        if not SIZE_RE.match(args.size):
+            raise Fail("--size must be WIDTHxHEIGHT in display pixels, such as 1080x2340")
+        opts.append(f"size={args.size}")
+    if args.dpi is not None:
+        opts.append(f"dpi={args.dpi}")
+    if args.hidden:
+        opts.append("hidden=1")
+    line = " ".join(["launch", pkg, *opts, label(pkg)]).rstrip()
+    # The desktop entries' fallback ignores the options, so only a plain launch uses it.
+    fallback = args.stock_fallback and not opts
+    try:
+        before = window(pkg)
+    except Fail:
+        before = None
+    try:
+        reply = request(line)
+    except OSError:
+        if session_running():
+            if fallback:
+                stock(pkg)  # the service is disabled or not running
+            raise Fail("Waydroid is running but the service isn't; check `adb logcat -s waydroid-app-displays`")
+        subprocess.Popen([WAYDROID, "session", "start"], stdin=subprocess.DEVNULL,
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+        deadline = time.monotonic() + START_TIMEOUT
+        while True:
+            time.sleep(0.5)
+            try:
+                reply = request(line)
+                break
+            except OSError:
+                if time.monotonic() > deadline:
+                    if fallback:
+                        stock(pkg)
+                    raise Fail(f"the service didn't start within {START_TIMEOUT} s")
+    if not reply.startswith("ok"):
+        raise Fail(reply[len("error"):].strip())
+    if before and not before["hidden"] and bool(before["fixed_size"]) != bool(args.size):
+        set_floating(pkg, bool(args.size))
+    if args.quiet:
+        return
+    w = wait_for_display(pkg)
+    # A window that sizes its display may be resized once the compositor places it.
+    deadline = time.monotonic() + SETTLE_TIMEOUT
+    while not args.size and not args.hidden and time.monotonic() < deadline:
+        time.sleep(SETTLE_INTERVAL)
+        now = window(pkg)
+        if now is None or (now["width"], now["height"]) == (w["width"], w["height"]):
+            break
+        w = now
+    print_info(w, adb_serial(), args.json)
+
+
+def cmd_info(args):
+    w = window(args.package)
+    if w is None:
+        raise Fail(f"{args.package} isn't open")
+    print_info(w, adb_serial(), args.json)
+
+
+def cmd_list(args):
+    ws = windows()
+    if args.json:
+        print(json.dumps(ws, indent=2))
+        return
+    for w in ws:
+        where = "hidden" if w["hidden"] else "window"
+        print(f"{w['package']}  display {w['display_id']}  {w['width']}x{w['height']} at {w['dpi']} dpi  {where}")
+
+
+def cmd_close(args):
+    checked(f"close {args.package}")
+
+
+def cmd_focus(args):
+    checked(f"focus {args.package}")
+
+
+def cmd_screenshot(args):
+    reply = checked(f"screenshot {args.package}", timeout=30)
+    path = reply.split(" ", 1)[1]
+    if not path.startswith("/data/"):
+        raise Fail(f"unexpected reply: {reply}")
+    host = os.path.join(ANDROID_DATA, path[len("/data/"):])
+    if args.output == "-":
+        with open(host, "rb") as f:
+            shutil.copyfileobj(f, sys.stdout.buffer)
+        os.unlink(host)
+        return
+    out = args.output
+    if not out:
+        os.makedirs(SHOTS, exist_ok=True)
+        out = os.path.join(SHOTS, os.path.basename(host))
+    shutil.move(host, out)
+    print(out)
+
+
+def main():
+    p = argparse.ArgumentParser(prog="waydroid-app-displays", description=__doc__,
+                                formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = p.add_subparsers(dest="command", required=True)
+
+    s = sub.add_parser("launch", help="open an app and print how to capture, drive and inspect it")
+    s.add_argument("package")
+    s.add_argument("--size", metavar="WxH",
+                   help="Android display size in pixels, such as 1080x2340; the window is sized to "
+                        "match, or scaled down to fit the monitor. Default: follow the window")
+    s.add_argument("--dpi", type=int, metavar="N",
+                   help="Android density, such as 440; dp width = pixels * 160 / dpi. Default: scale "
+                        "with the window, or 440 for a hidden phone-sized display")
+    s.add_argument("--hidden", action="store_true",
+                   help="no window: run the app on an off-screen display, 1080x2340 at 440 dpi unless "
+                        "--size and --dpi say otherwise")
+    s.add_argument("--json", action="store_true", help="print the display and commands as JSON")
+    s.add_argument("--quiet", action="store_true", help="print nothing; don't wait for the display")
+    s.add_argument("--stock-fallback", action="store_true", help=argparse.SUPPRESS)
+    s.set_defaults(func=cmd_launch)
+
+    s = sub.add_parser("info", help="print the commands for an open app again")
+    s.add_argument("package")
+    s.add_argument("--json", action="store_true")
+    s.set_defaults(func=cmd_info)
+
+    s = sub.add_parser("screenshot", help="save an app's display as a PNG")
+    s.add_argument("package")
+    s.add_argument("-o", "--output", metavar="FILE",
+                   help=f"PNG path, or - for stdout. Default: a new file in {SHOTS}, whose path is printed")
+    s.set_defaults(func=cmd_screenshot)
+
+    s = sub.add_parser("list", help="list open apps and their displays")
+    s.add_argument("--json", action="store_true")
+    s.set_defaults(func=cmd_list)
+
+    s = sub.add_parser("close", help="close an app's window or hidden display")
+    s.add_argument("package")
+    s.set_defaults(func=cmd_close)
+
+    s = sub.add_parser("focus", help="send keyboard input to an app's display, such as a hidden one")
+    s.add_argument("package")
+    s.set_defaults(func=cmd_focus)
+
+    args = p.parse_args()
+    try:
+        args.func(args)
+    except Fail as e:
+        print(f"waydroid-app-displays: {e}", file=sys.stderr)
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()
