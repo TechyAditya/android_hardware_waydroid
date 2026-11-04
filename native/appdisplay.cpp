@@ -92,6 +92,7 @@ struct {
     wl_display *display = nullptr;
     wl_registry *registry = nullptr;
     wl_compositor *compositor = nullptr;
+    wl_subcompositor *subcompositor = nullptr;
     wl_shm *shm = nullptr;
     xdg_wm_base *wm_base = nullptr;
     wp_viewporter *viewporter = nullptr;
@@ -349,8 +350,84 @@ void try_acquire(Window *w) {
     present(w, r, image);
 }
 
-void set_destination(Window *w) {
+// Fits the frame on screen into the window without stretching it, and commits both surfaces.
+// The frame fills the window unless their shapes differ by more than a pixel, as while a resize
+// waits for the display; then it is centred over the backdrop, which shows the blur if one has
+// arrived. A blur is dropped once the frame fills the window again.
+void apply_layout(Window *w) {
+    int x = 0, y = 0, cw = w->width, ch = w->height;
+    if (w->frame_w > 0 && w->frame_h > 0) {
+        double f = std::min(double(w->width) / w->frame_w, double(w->height) / w->frame_h);
+        int fw = std::max(1, int(std::lround(w->frame_w * f)));
+        int fh = std::max(1, int(std::lround(w->frame_h * f)));
+        if (std::abs(fw - w->width) > 1 || std::abs(fh - w->height) > 1) {
+            cw = fw;
+            ch = fh;
+            x = (w->width - fw) / 2;
+            y = (w->height - fh) / 2;
+        }
+    }
+    if (x != w->content_x || y != w->content_y) {
+        wl_subsurface_set_position(w->subsurface, x, y);
+        w->content_x = x;
+        w->content_y = y;
+    }
+    if (cw != w->content_w || ch != w->content_h) {
+        wp_viewport_set_destination(w->content_viewport, cw, ch);
+        w->content_w = cw;
+        w->content_h = ch;
+    }
+    bool letterboxed = cw != w->width || ch != w->height;
+    wl_buffer *backdrop = letterboxed && w->blur ? w->blur : g.placeholder;
+    if (backdrop != w->backdrop) {
+        wl_surface_attach(w->surface, backdrop, 0, 0);
+        wl_surface_damage_buffer(w->surface, 0, 0, INT32_MAX, INT32_MAX);
+        w->backdrop = backdrop;
+    }
     wp_viewport_set_destination(w->viewport, w->width, w->height);
+
+    // The filler covers the margin right of or below the frame with the backdrop's part there.
+    int fx = 0, fy = 0, fw = 0, fh = 0;
+    if (letterboxed && x > 0) {
+        fx = x + cw;
+        fw = w->width - fx;
+        fh = w->height;
+    } else if (letterboxed) {
+        fy = y + ch;
+        fw = w->width;
+        fh = w->height - fy;
+    }
+    if (fw > 0 && fh > 0) {
+        wl_subsurface_set_position(w->filler_subsurface, fx, fy);
+        wp_viewport_set_destination(w->filler_viewport, fw, fh);
+        if (backdrop == w->blur) {
+            // The source has to stay inside the buffer, which rounding to wl_fixed could break.
+            double sx = double(w->blur_w) / w->width, sy = double(w->blur_h) / w->height;
+            wl_fixed_t left = wl_fixed_from_double(fx * sx), top = wl_fixed_from_double(fy * sy);
+            wl_fixed_t width = std::min(wl_fixed_from_double(fw * sx), wl_fixed_from_int(w->blur_w) - left);
+            wl_fixed_t height = std::min(wl_fixed_from_double(fh * sy), wl_fixed_from_int(w->blur_h) - top);
+            wp_viewport_set_source(w->filler_viewport, left, top, width, height);
+        } else {
+            wl_fixed_t unset = wl_fixed_from_int(-1);
+            wp_viewport_set_source(w->filler_viewport, unset, unset, unset, unset);
+        }
+        wl_surface_attach(w->filler, backdrop, 0, 0);
+        wl_surface_damage_buffer(w->filler, 0, 0, INT32_MAX, INT32_MAX);
+        w->filler_mapped = true;
+    } else if (w->filler_mapped) {
+        wl_surface_attach(w->filler, nullptr, 0, 0);
+        w->filler_mapped = false;
+    }
+
+    // The subsurfaces are synchronized: their commits apply with their parent's, so the frame,
+    // the filler, their positions and the backdrop change together.
+    wl_surface_commit(w->content);
+    wl_surface_commit(w->filler);
+    wl_surface_commit(w->surface);
+    if (!letterboxed && w->blur) {
+        wl_buffer_destroy(w->blur);
+        w->blur = nullptr;
+    }
 }
 
 void present(Window *w, Reader *r, AImage *image) {
@@ -375,13 +452,68 @@ void present(Window *w, Reader *r, AImage *image) {
         AImage_delete(e->held);
     e->held = image;
 
-    wl_surface_attach(w->surface, e->wl, 0, 0);
-    wl_surface_damage_buffer(w->surface, 0, 0, INT32_MAX, INT32_MAX);
-    set_destination(w);
-    wl_surface_commit(w->surface);
+    wl_surface_attach(w->content, e->wl, 0, 0);
+    wl_surface_damage_buffer(w->content, 0, 0, INT32_MAX, INT32_MAX);
+    w->frame_w = r->width;
+    w->frame_h = r->height;
+    apply_layout(w);
     w->attached = e;
     w->has_frame = true;
     collect_readers(w);
+}
+
+// ---- Blur ----
+
+// Asks Java for a small, blurred copy of the display, which arrives as MSG_BLUR.
+void request_blur(Window *w) {
+    if (w->display_id < 0)
+        return;
+    java.env->CallVoidMethod(java.bridge, java.requestBlur, int(w->id), w->display_id, w->display_w, w->display_h);
+    w->blur_pending = java.check("requestBlur");
+}
+
+wl_buffer *shm_buffer(const jint *pixels, int width, int height) {
+    size_t size = size_t(width) * height * 4;
+    int fd = memfd_create("blur", MFD_CLOEXEC);
+    if (fd < 0)
+        return nullptr;
+    void *map = MAP_FAILED;
+    if (ftruncate(fd, off_t(size)) == 0)
+        map = mmap(nullptr, size, PROT_WRITE, MAP_SHARED, fd, 0);
+    if (map == MAP_FAILED) {
+        close(fd);
+        return nullptr;
+    }
+    // Java's ARGB ints are XRGB8888 in memory on a little-endian machine.
+    memcpy(map, pixels, size);
+    munmap(map, size);
+    wl_shm_pool *pool = wl_shm_create_pool(g.shm, fd, int32_t(size));
+    wl_buffer *b = wl_shm_pool_create_buffer(pool, 0, width, height, width * 4, WL_SHM_FORMAT_XRGB8888);
+    wl_shm_pool_destroy(pool);
+    close(fd);
+    return b;
+}
+
+void receive_blur(uint32_t id) {
+    Window *w = window_by_id(id);
+    if (w)
+        w->blur_pending = false;
+    // Taken even for a window that is gone, so Java doesn't keep it.
+    auto px = static_cast<jintArray>(java.env->CallObjectMethod(java.bridge, java.takeBlur, jint(id)));
+    if (!java.check("takeBlur") || !px)
+        return;
+    jsize n = java.env->GetArrayLength(px);
+    jint *data = n > 2 ? java.env->GetIntArrayElements(px, nullptr) : nullptr;
+    if (data && w && !w->closing && w->surface && !w->blur && n == 2 + jsize(data[0]) * data[1]) {
+        w->blur = shm_buffer(data + 2, data[0], data[1]);
+        w->blur_w = data[0];
+        w->blur_h = data[1];
+        if (w->blur)
+            apply_layout(w); // shows it, or drops it if the resize is already done
+    }
+    if (data)
+        java.env->ReleaseIntArrayElements(px, data, JNI_ABORT);
+    java.env->DeleteLocalRef(px);
 }
 
 // ---- Displays ----
@@ -538,7 +670,9 @@ void do_resize(Window *w) {
     w->last_resize = now_ms();
 }
 
-// Resizes right away or, within resize_interval_ms of the last resize, once the interval is up.
+// Resizes right away, except while the user drags the window's edge, when it waits until the
+// edge has rested for resize_interval_ms: every resize makes the app lay itself out again.
+// Other changes within resize_interval_ms of the last resize wait for the interval to end.
 void schedule_resize(Window *w, bool immediate) {
     if (!w->display || w->closing)
         return;
@@ -549,7 +683,12 @@ void schedule_resize(Window *w, bool immediate) {
         return;
     }
     int64_t now = now_ms();
-    if (immediate || now - w->last_resize >= g.resize_interval_ms) {
+    if (immediate) {
+        do_resize(w);
+    } else if (w->resizing) {
+        w->resize_pending = true;
+        w->resize_due = now + g.resize_interval_ms;
+    } else if (now - w->last_resize >= g.resize_interval_ms) {
         do_resize(w);
     } else if (!w->resize_pending) {
         w->resize_pending = true;
@@ -580,12 +719,16 @@ void fractional_preferred_scale(void *data, wp_fractional_scale_v1 *, uint32_t s
 }
 const wp_fractional_scale_v1_listener fractional_listener = {fractional_preferred_scale};
 
-void toplevel_configure(void *data, xdg_toplevel *, int32_t width, int32_t height, wl_array *) {
+void toplevel_configure(void *data, xdg_toplevel *, int32_t width, int32_t height, wl_array *states) {
     Window *w = window_by_id(uint32_t(uintptr_t(data)));
     if (!w)
         return;
     w->pending_w = width;
     w->pending_h = height;
+    w->pending_resizing = false;
+    const auto *state = static_cast<const uint32_t *>(states->data);
+    for (size_t i = 0; i < states->size / sizeof(uint32_t); i++)
+        w->pending_resizing |= state[i] == XDG_TOPLEVEL_STATE_RESIZING;
 }
 
 void toplevel_close(void *data, xdg_toplevel *) {
@@ -608,14 +751,17 @@ void xsurface_configure(void *data, xdg_surface *xs, uint32_t serial) {
     int width = w->pending_w > 0 ? w->pending_w : fallback_w;
     int height = w->pending_h > 0 ? w->pending_h : fallback_h;
     bool first = !w->configured;
+    bool resized = !first && (width != w->width || height != w->height);
+    bool released = w->resizing && !w->pending_resizing;
     w->configured = true;
     w->width = width;
     w->height = height;
+    w->resizing = w->pending_resizing;
 
-    if (!w->has_frame)
-        wl_surface_attach(w->surface, g.placeholder, 0, 0);
-    set_destination(w);
-    wl_surface_commit(w->surface);
+    // A display that follows the window will catch up; until then the frame is letterboxed.
+    if (resized && !w->fixed_w && w->has_frame && !w->blur && !w->blur_pending)
+        request_blur(w);
+    apply_layout(w);
 
     if (first && g.fractional && !w->scale120) {
         // The compositor sends the window's own scale once it is mapped; sizing the display
@@ -625,7 +771,7 @@ void xsurface_configure(void *data, xdg_surface *xs, uint32_t serial) {
     } else if (first) {
         start_display(w);
     } else {
-        schedule_resize(w, false);
+        schedule_resize(w, released);
     }
 }
 const xdg_surface_listener xsurface_listener = {xsurface_configure};
@@ -671,6 +817,10 @@ void surface_leave(void *data, wl_surface *, wl_output *output) {
         refresh_changed();
 }
 const wl_surface_listener surface_listener = {surface_enter, surface_leave};
+// The toplevel surface tracks the monitors; the frame's subsurface only carries the window id.
+void content_enter(void *, wl_surface *, wl_output *) {}
+void content_leave(void *, wl_surface *, wl_output *) {}
+const wl_surface_listener content_listener = {content_enter, content_leave};
 
 void output_geometry(void *, wl_output *, int32_t, int32_t, int32_t, int32_t, int32_t, const char *, const char *,
         int32_t) {}
@@ -779,6 +929,18 @@ void create_surface(Window *w) {
     xdg_toplevel_set_app_id(w->toplevel, ("waydroid." + w->pkg).c_str());
     xdg_toplevel_set_title(w->toplevel, w->title.c_str());
     update_size_hints(w);
+
+    w->content = wl_compositor_create_surface(g.compositor);
+    wl_surface_add_listener(w->content, &content_listener, tag);
+    w->content_viewport = wp_viewporter_get_viewport(g.viewporter, w->content);
+    w->subsurface = wl_subcompositor_get_subsurface(g.subcompositor, w->content, w->surface);
+    w->filler = wl_compositor_create_surface(g.compositor);
+    w->filler_viewport = wp_viewporter_get_viewport(g.viewporter, w->filler);
+    w->filler_subsurface = wl_subcompositor_get_subsurface(g.subcompositor, w->filler, w->surface);
+    wl_subsurface_place_above(w->filler_subsurface, w->content);
+    w->content_x = w->content_y = w->content_w = w->content_h = 0;
+    w->backdrop = nullptr;
+    w->filler_mapped = false;
     wl_surface_commit(w->surface);
 }
 
@@ -832,15 +994,27 @@ void destroy_window(Window *w) {
     }
     // Detach first, so no buffer is destroyed while it is still the surface's content.
     if (w->surface) {
+        wl_surface_attach(w->content, nullptr, 0, 0);
+        wl_surface_commit(w->content);
+        wl_surface_attach(w->filler, nullptr, 0, 0);
+        wl_surface_commit(w->filler);
         wl_surface_attach(w->surface, nullptr, 0, 0);
         wl_surface_commit(w->surface);
     }
     for (auto &r : w->readers)
         free_reader(w, r.get());
     w->readers.clear();
+    if (w->blur)
+        wl_buffer_destroy(w->blur);
     if (w->fractional)
         wp_fractional_scale_v1_destroy(w->fractional);
     if (w->surface) {
+        wp_viewport_destroy(w->filler_viewport);
+        wl_subsurface_destroy(w->filler_subsurface);
+        wl_surface_destroy(w->filler);
+        wp_viewport_destroy(w->content_viewport);
+        wl_subsurface_destroy(w->subsurface);
+        wl_surface_destroy(w->content);
         wp_viewport_destroy(w->viewport);
         xdg_toplevel_destroy(w->toplevel);
         xdg_surface_destroy(w->xsurface);
@@ -1004,7 +1178,12 @@ std::string handle_command(const std::string &line, int fd) {
                    " scale120=" + std::to_string(w->scale120) + " frame_waiting=" + std::to_string(w->frame_waiting) +
                    " pending_image=" + std::to_string(w->pending_image != nullptr) +
                    " resize_pending=" + std::to_string(w->resize_pending) + " outputs=" +
-                   std::to_string(w->outputs.size()) + "\n";
+                   std::to_string(w->outputs.size()) + " resizing=" + std::to_string(w->resizing) +
+                   " frame=" + std::to_string(w->frame_w) + "x" + std::to_string(w->frame_h) + " content=" +
+                   std::to_string(w->content_w) + "x" + std::to_string(w->content_h) + "+" +
+                   std::to_string(w->content_x) + "+" + std::to_string(w->content_y) +
+                   " blur=" + std::to_string(w->blur != nullptr) + " blur_pending=" + std::to_string(w->blur_pending) +
+                   "\n";
             for (auto &r : w->readers) {
                 int held = 0, attached = 0;
                 for (auto &[bid, e] : r->bufs) {
@@ -1088,6 +1267,8 @@ void registry_global(void *, wl_registry *registry, uint32_t name, const char *i
     };
     if (!strcmp(iface, wl_compositor_interface.name)) {
         g.compositor = static_cast<wl_compositor *>(bind(&wl_compositor_interface, 4));
+    } else if (!strcmp(iface, wl_subcompositor_interface.name)) {
+        g.subcompositor = static_cast<wl_subcompositor *>(bind(&wl_subcompositor_interface, 1));
     } else if (!strcmp(iface, wl_shm_interface.name)) {
         g.shm = static_cast<wl_shm *>(bind(&wl_shm_interface, 1));
         wl_shm_add_listener(g.shm, &shm_listener, nullptr);
@@ -1148,6 +1329,8 @@ void drain_messages() {
             if (m.what == MSG_FRAME) {
                 if (Window *w = window_by_id(m.window))
                     try_acquire(w);
+            } else if (m.what == MSG_BLUR) {
+                receive_blur(m.window);
             } else if (m.what == MSG_TASKS_CHANGED && !g.tasks_dirty) {
                 g.tasks_dirty = true;
                 g.tasks_due = now_ms() + kTaskCheckDelayMs;
@@ -1239,8 +1422,11 @@ int loop(const char *control_path) {
         if (fds[1].revents & POLLIN)
             drain_messages();
         if (g_lost_wakeup.exchange(false)) {
-            for (auto &[id, w] : g.windows)
+            for (auto &[id, w] : g.windows) {
                 try_acquire(w.get());
+                if (w->blur_pending)
+                    receive_blur(id);
+            }
             g.tasks_dirty = true;
             g.tasks_due = now_ms();
         }
@@ -1290,6 +1476,7 @@ void disconnect(const char *control_path) {
     g.display = nullptr;
     g.registry = nullptr;
     g.compositor = nullptr;
+    g.subcompositor = nullptr;
     g.shm = nullptr;
     g.wm_base = nullptr;
     g.viewporter = nullptr;
@@ -1330,8 +1517,8 @@ int run(const char *runtime_dir, const char *wayland_display, const char *contro
     wl_display_roundtrip(g.display);
     wl_display_roundtrip(g.display);
     int status = 1;
-    if (!g.compositor || !g.shm || !g.wm_base || !g.viewporter) {
-        ALOGE("compositor lacks wl_compositor, wl_shm, xdg_wm_base or wp_viewporter");
+    if (!g.compositor || !g.subcompositor || !g.shm || !g.wm_base || !g.viewporter) {
+        ALOGE("compositor lacks wl_compositor, wl_subcompositor, wl_shm, xdg_wm_base or wp_viewporter");
     } else {
         g.placeholder = make_placeholder();
         refresh_changed();
@@ -1361,9 +1548,16 @@ Window *window_for_surface(wl_surface *surface) {
     return w && w->surface == surface && !w->closing ? w : nullptr;
 }
 
+Window *window_for_content(wl_surface *surface) {
+    if (!surface)
+        return nullptr;
+    Window *w = window_by_id(uint32_t(uintptr_t(wl_surface_get_user_data(surface))));
+    return w && w->content == surface && !w->closing ? w : nullptr;
+}
+
 void window_to_display(const Window *w, double sx, double sy, float *x, float *y) {
-    *x = float(w->width > 0 ? sx * w->display_w / w->width : sx);
-    *y = float(w->height > 0 ? sy * w->display_h / w->height : sy);
+    *x = float(w->content_w > 0 ? sx * w->display_w / w->content_w : sx);
+    *y = float(w->content_h > 0 ? sy * w->display_h / w->content_h : sy);
 }
 
 bool Java::check(const char *what) {
@@ -1420,6 +1614,8 @@ extern "C" JNIEXPORT jint JNICALL Java_waydroid_appdisplay_Native_run(JNIEnv *en
             {&java.injectKey, "injectKey", "(IIIIIJ)V"},
             {&java.setRefreshRate, "setRefreshRate", "(I)V"},
             {&java.screenshot, "screenshot", "(Ljava/lang/String;IIII)V"},
+            {&java.requestBlur, "requestBlur", "(IIII)V"},
+            {&java.takeBlur, "takeBlur", "(I)[I"},
     };
     for (auto &m : methods) {
         *m.id = env->GetMethodID(c, m.name, m.sig);

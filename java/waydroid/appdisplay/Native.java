@@ -2,6 +2,7 @@ package waydroid.appdisplay;
 
 final class Native {
     static final int MSG_TASKS_CHANGED = 2;
+    static final int MSG_BLUR = 3;
 
     static native boolean dropToSystem();
 

@@ -137,7 +137,8 @@ void pointer_enter(void *, wl_pointer *pointer, uint32_t serial, wl_surface *sur
         s.shape_device = wp_cursor_shape_manager_v1_get_pointer(s.shapes, pointer);
     if (s.shape_device)
         wp_cursor_shape_device_v1_set_shape(s.shape_device, serial, WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_DEFAULT);
-    Window *w = window_for_surface(surface);
+    // The backdrop around a letterboxed frame takes no input.
+    Window *w = window_for_content(surface);
     s.pointer_window = w ? w->id : 0;
     s.px = wl_fixed_to_double(x);
     s.py = wl_fixed_to_double(y);
@@ -396,7 +397,7 @@ int touch_index(int32_t wl_id) {
 }
 
 void touch_down(void *, wl_touch *, uint32_t, uint32_t, wl_surface *surface, int32_t id, wl_fixed_t x, wl_fixed_t y) {
-    Window *w = window_for_surface(surface);
+    Window *w = window_for_content(surface);
     if (!w)
         return;
     if (s.touches.empty())
