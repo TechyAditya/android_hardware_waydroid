@@ -284,8 +284,10 @@ final class AndroidBridge {
             @Override
             public void run() {
                 String line;
+                File file = null;
                 try {
-                    line = "ok " + capture(pkg, displayId, width, height) + "\n";
+                    file = capture(pkg, displayId, width, height);
+                    line = "ok " + file.getPath() + "\n";
                 } catch (Throwable t) {
                     Log.e(TAG, "capturing display " + displayId + " failed", t);
                     Throwable cause = t.getCause() != null ? t.getCause() : t;
@@ -294,7 +296,10 @@ final class AndroidBridge {
                 try (OutputStream out = new ParcelFileDescriptor.AutoCloseOutputStream(reply)) {
                     out.write(line.getBytes(StandardCharsets.UTF_8));
                 } catch (IOException e) {
+                    // Nobody will collect the file.
                     Log.w(TAG, "can't send the screenshot reply", e);
+                    if (file != null)
+                        file.delete();
                 }
             }
         }, "screenshot").start();
@@ -305,7 +310,7 @@ final class AndroidBridge {
      * display of its own, as scrcpy does: the window's buffers are GPU memory, which the CPU
      * can't map, and `screencap` only reaches physical displays.
      */
-    private static String capture(String pkg, int displayId, int width, int height) throws Exception {
+    private static File capture(String pkg, int displayId, int width, int height) throws Exception {
         Object displayManager = service("display", "android.hardware.display.IDisplayManager");
         Object info = method(displayManager, "getDisplayInfo", 1).invoke(displayManager, displayId);
         if (info == null)
@@ -314,8 +319,14 @@ final class AndroidBridge {
 
         Class<?> sc = SurfaceControl.class;
         ImageReader reader = ImageReader.newInstance(width, height, PixelFormat.RGBA_8888, 2);
-        IBinder token = (IBinder) sc.getMethod("createDisplay", String.class, boolean.class)
-                .invoke(null, TAG + "-capture", true);
+        IBinder token;
+        try {
+            token = (IBinder) sc.getMethod("createDisplay", String.class, boolean.class)
+                    .invoke(null, TAG + "-capture", true);
+        } catch (Throwable t) {
+            reader.close();
+            throw t;
+        }
         Bitmap bitmap;
         try {
             Rect rect = new Rect(0, 0, width, height);
@@ -359,7 +370,7 @@ final class AndroidBridge {
         }
         if (!part.renameTo(file))
             throw new IOException("can't rename " + part + " to " + file);
-        return file.getPath();
+        return file;
     }
 
     private static Bitmap toBitmap(Image image) {

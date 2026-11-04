@@ -34,6 +34,8 @@ DISPLAY_TIMEOUT = 15
 # Longer than the service's default resize_interval_ms of 500, which delays a second resize.
 SETTLE_INTERVAL = 0.7
 SETTLE_TIMEOUT = 3
+STALE = ("the running service is older than this command; run `sudo ./install.sh --restart` "
+         "in the waydroid-app-displays checkout, or restart Waydroid")
 SIZE_RE = re.compile(r"^[0-9]+x[0-9]+$")
 LIST_RE = re.compile(r"^(\S+) display=(-?\d+) (\d+)x(\d+) dpi=(\d+)(?: hidden=(\d))?(?: window=(\d+)x(\d+))?"
                      r"(?: fixed=(\d+)x(\d+) fixed_dpi=(\d+))?")
@@ -66,13 +68,19 @@ def request(line, timeout=5):
     return b"".join(chunks).decode().strip()
 
 
+def error(reply):
+    if reply == "error unknown command":
+        return Fail(STALE)
+    return Fail(reply[len("error"):].strip())
+
+
 def checked(line, timeout=5):
     try:
         reply = request(line, timeout)
     except OSError as e:
         raise Fail(f"the service isn't reachable ({e}); is Waydroid running?")
     if reply.startswith("error"):
-        raise Fail(reply[len("error"):].strip())
+        raise error(reply)
     return reply
 
 
@@ -119,7 +127,10 @@ def adb_serial():
     serial = f"{m[1]}:5555"
     devices = subprocess.run(["adb", "devices"], capture_output=True, text=True).stdout
     if not re.search(rf"^{re.escape(serial)}\s+device$", devices, re.M):
-        subprocess.run(["adb", "connect", serial], capture_output=True, timeout=10)
+        try:
+            subprocess.run(["adb", "connect", serial], capture_output=True, timeout=10)
+        except subprocess.TimeoutExpired:
+            pass  # the printed commands still name the serial
     return serial
 
 
@@ -231,7 +242,12 @@ def cmd_launch(args):
     fallback = args.stock_fallback and not opts
     try:
         before = window(pkg)
-    except Fail:
+        # A service without `version` would open a plain window titled with the options.
+        if opts:
+            checked("version")
+    except Fail as e:
+        if e.args[0] == STALE:
+            raise
         before = None
     try:
         reply = request(line)
@@ -254,7 +270,7 @@ def cmd_launch(args):
                         stock(pkg)
                     raise Fail(f"the service didn't start within {START_TIMEOUT} s")
     if not reply.startswith("ok"):
-        raise Fail(reply[len("error"):].strip())
+        raise error(reply)
     if before and not before["hidden"] and bool(before["fixed_size"]) != bool(args.size):
         set_floating(pkg, bool(args.size))
     if args.quiet:

@@ -47,6 +47,8 @@ void post(const Msg &msg) {
 
 namespace {
 
+// The control commands' version, which `version` reports; 2 added launch options and screenshots.
+constexpr int kProtocolVersion = 2;
 constexpr int kImages = 4;
 constexpr int kDefaultWidth = 1280, kDefaultHeight = 800;
 // A hidden display launched without a size is a phone, about 393 dp wide.
@@ -967,6 +969,8 @@ std::string handle_command(const std::string &line, int fd) {
         }
         return "";
     }
+    if (cmd == "version") // a service without this command takes launch options as the title
+        return "ok " + std::to_string(kProtocolVersion) + "\n";
     if (cmd == "focus") {
         Window *w = window_for_pkg(pkg);
         if (!w || w->display_id < 0)
