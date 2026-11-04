@@ -43,7 +43,6 @@ import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.Locale;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
@@ -306,8 +305,58 @@ final class AndroidBridge {
         }, "screenshot").start();
     }
 
+    /**
+     * Mirrors the display's layer stack into a CPU-readable buffer through a SurfaceFlinger
+     * display of its own, as scrcpy does: the window's buffers are GPU memory, which the CPU
+     * can't map, and `screencap` only reaches physical displays.
+     */
     private static File capture(String pkg, int displayId, int width, int height) throws Exception {
-        Bitmap bitmap = grab(displayId, width, height, width, height);
+        Object displayManager = service("display", "android.hardware.display.IDisplayManager");
+        Object info = method(displayManager, "getDisplayInfo", 1).invoke(displayManager, displayId);
+        if (info == null)
+            throw new IllegalStateException("display " + displayId + " is gone");
+        int layerStack = field(info, "layerStack").getInt(info);
+
+        Class<?> sc = SurfaceControl.class;
+        ImageReader reader = ImageReader.newInstance(width, height, PixelFormat.RGBA_8888, 2);
+        IBinder token;
+        try {
+            token = (IBinder) sc.getMethod("createDisplay", String.class, boolean.class)
+                    .invoke(null, TAG + "-capture", true);
+        } catch (Throwable t) {
+            reader.close();
+            throw t;
+        }
+        Bitmap bitmap;
+        try {
+            Rect rect = new Rect(0, 0, width, height);
+            sc.getMethod("openTransaction").invoke(null);
+            try {
+                sc.getMethod("setDisplaySurface", IBinder.class, Surface.class).invoke(null, token, reader.getSurface());
+                sc.getMethod("setDisplayProjection", IBinder.class, int.class, Rect.class, Rect.class)
+                        .invoke(null, token, 0, rect, rect);
+                sc.getMethod("setDisplayLayerStack", IBinder.class, int.class).invoke(null, token, layerStack);
+            } finally {
+                sc.getMethod("closeTransaction").invoke(null);
+            }
+            Image image;
+            long deadline = SystemClock.uptimeMillis() + CAPTURE_TIMEOUT_MS;
+            while ((image = reader.acquireLatestImage()) == null) {
+                if (SystemClock.uptimeMillis() > deadline)
+                    throw new IllegalStateException("no frame from display " + displayId + " within "
+                            + CAPTURE_TIMEOUT_MS + " ms");
+                SystemClock.sleep(5);
+            }
+            try {
+                bitmap = toBitmap(image);
+            } finally {
+                image.close();
+            }
+        } finally {
+            sc.getMethod("destroyDisplay", IBinder.class).invoke(null, token);
+            reader.close();
+        }
+
         File dir = new File(Main.DIR, "captures");
         if (!dir.isDirectory() && !dir.mkdirs())
             throw new IOException("can't create " + dir);
@@ -322,139 +371,6 @@ final class AndroidBridge {
         if (!part.renameTo(file))
             throw new IOException("can't rename " + part + " to " + file);
         return file;
-    }
-
-    /**
-     * Mirrors the display's layer stack, {@code width} by {@code height}, into a CPU-readable
-     * buffer of {@code outWidth} by {@code outHeight} through a SurfaceFlinger display of its
-     * own, as scrcpy does: the window's buffers are GPU memory, which the CPU can't map, and
-     * `screencap` only reaches physical displays.
-     */
-    private static Bitmap grab(int displayId, int width, int height, int outWidth, int outHeight) throws Exception {
-        Object displayManager = service("display", "android.hardware.display.IDisplayManager");
-        Object info = method(displayManager, "getDisplayInfo", 1).invoke(displayManager, displayId);
-        if (info == null)
-            throw new IllegalStateException("display " + displayId + " is gone");
-        int layerStack = field(info, "layerStack").getInt(info);
-
-        Class<?> sc = SurfaceControl.class;
-        ImageReader reader = ImageReader.newInstance(outWidth, outHeight, PixelFormat.RGBA_8888, 2);
-        IBinder token;
-        try {
-            token = (IBinder) sc.getMethod("createDisplay", String.class, boolean.class)
-                    .invoke(null, TAG + "-capture", true);
-        } catch (Throwable t) {
-            reader.close();
-            throw t;
-        }
-        try {
-            sc.getMethod("openTransaction").invoke(null);
-            try {
-                sc.getMethod("setDisplaySurface", IBinder.class, Surface.class).invoke(null, token, reader.getSurface());
-                sc.getMethod("setDisplayProjection", IBinder.class, int.class, Rect.class, Rect.class)
-                        .invoke(null, token, 0, new Rect(0, 0, width, height), new Rect(0, 0, outWidth, outHeight));
-                sc.getMethod("setDisplayLayerStack", IBinder.class, int.class).invoke(null, token, layerStack);
-            } finally {
-                sc.getMethod("closeTransaction").invoke(null);
-            }
-            Image image;
-            long deadline = SystemClock.uptimeMillis() + CAPTURE_TIMEOUT_MS;
-            while ((image = reader.acquireLatestImage()) == null) {
-                if (SystemClock.uptimeMillis() > deadline)
-                    throw new IllegalStateException("no frame from display " + displayId + " within "
-                            + CAPTURE_TIMEOUT_MS + " ms");
-                SystemClock.sleep(5);
-            }
-            try {
-                return toBitmap(image);
-            } finally {
-                image.close();
-            }
-        } finally {
-            sc.getMethod("destroyDisplay", IBinder.class).invoke(null, token);
-            reader.close();
-        }
-    }
-
-    // ---- Blur ----
-
-    // The blur behind a resizing window: a capture this wide, blurred, dimmed, then scaled up
-    // by the compositor.
-    private static final int BLUR_WIDTH = 160;
-    private static final int BLUR_RADIUS = 6;
-    private static final int BLUR_PASSES = 3; // box blurs in a row approach a Gaussian
-    private static final int BLUR_BRIGHTNESS = 60; // percent
-
-    private final ConcurrentHashMap<Integer, int[]> blurs = new ConcurrentHashMap<>();
-
-    /** Blurs the display on a worker thread, then posts MSG_BLUR for the window, done or not. */
-    void requestBlur(final int windowId, final int displayId, final int width, final int height) {
-        new Thread(new Runnable() {
-            @Override
-            public void run() {
-                try {
-                    blurs.put(windowId, blur(displayId, width, height));
-                } catch (Throwable t) {
-                    Log.w(TAG, "blurring display " + displayId + " failed", t);
-                }
-                Native.post(Native.MSG_BLUR, windowId);
-            }
-        }, "blur").start();
-    }
-
-    /** The window's blur as {width, height, ARGB pixels...}, or null. */
-    int[] takeBlur(int windowId) {
-        return blurs.remove(windowId);
-    }
-
-    private static int[] blur(int displayId, int width, int height) throws Exception {
-        int w = BLUR_WIDTH, h = Math.max(1, Math.round((float) height * w / width));
-        Bitmap bitmap = grab(displayId, width, height, w, h);
-        int[] px = new int[w * h];
-        bitmap.getPixels(px, 0, w, 0, 0, w, h);
-        bitmap.recycle();
-        int[] r = new int[w * h], g = new int[w * h], b = new int[w * h], tmp = new int[w * h];
-        for (int i = 0; i < px.length; i++) {
-            r[i] = (px[i] >> 16) & 0xff;
-            g[i] = (px[i] >> 8) & 0xff;
-            b[i] = px[i] & 0xff;
-        }
-        for (int pass = 0; pass < BLUR_PASSES; pass++) {
-            for (int[] c : new int[][] {r, g, b}) {
-                boxBlur(c, tmp, h, w, w, 1); // rows
-                boxBlur(tmp, c, w, h, 1, w); // columns
-            }
-        }
-        int[] out = new int[2 + w * h];
-        out[0] = w;
-        out[1] = h;
-        for (int i = 0; i < px.length; i++)
-            out[2 + i] = 0xff000000 | (r[i] * BLUR_BRIGHTNESS / 100) << 16 | (g[i] * BLUR_BRIGHTNESS / 100) << 8
-                    | (b[i] * BLUR_BRIGHTNESS / 100);
-        return out;
-    }
-
-    /**
-     * Averages each sample with BLUR_RADIUS neighbours on either side along one axis, repeating
-     * the edge samples. Sample i of line l is at {@code l * lineStride + i * step}.
-     */
-    private static void boxBlur(int[] src, int[] dst, int lines, int length, int lineStride, int step) {
-        int span = 2 * BLUR_RADIUS + 1;
-        for (int line = 0; line < lines; line++) {
-            int base = line * lineStride;
-            int sum = 0;
-            for (int i = -BLUR_RADIUS; i <= BLUR_RADIUS; i++)
-                sum += src[base + clamp(i, length) * step];
-            for (int i = 0; i < length; i++) {
-                dst[base + i * step] = sum / span;
-                sum += src[base + clamp(i + BLUR_RADIUS + 1, length) * step]
-                        - src[base + clamp(i - BLUR_RADIUS, length) * step];
-            }
-        }
-    }
-
-    private static int clamp(int i, int length) {
-        return i < 0 ? 0 : i >= length ? length - 1 : i;
     }
 
     private static Bitmap toBitmap(Image image) {

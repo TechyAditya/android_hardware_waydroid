@@ -27,7 +27,6 @@ int64_t now_ms();
 enum : uint32_t {
     MSG_FRAME = 1,
     MSG_TASKS_CHANGED = 2,
-    MSG_BLUR = 3,
 };
 
 struct Msg {
@@ -68,36 +67,16 @@ struct Window {
     int fixed_w = 0, fixed_h = 0, fixed_dpi = 0;
     int hint_w = 0, hint_h = 0; // the fixed window size asked of the compositor, in logical pixels
 
-    // The toplevel surface is the backdrop: black, or a blur of the app while the display's shape
-    // lags the window's. The app's frames go to `content`, a subsurface above it.
     wl_surface *surface = nullptr;
     xdg_surface *xsurface = nullptr;
     xdg_toplevel *toplevel = nullptr;
     wp_viewport *viewport = nullptr;
     wp_fractional_scale_v1 *fractional = nullptr;
-    wl_surface *content = nullptr;
-    wl_subsurface *subsurface = nullptr;
-    wp_viewport *content_viewport = nullptr;
-    // Above the frame: the backdrop again, over the margin right of or below a letterboxed frame.
-    // Hyprland draws a subsurface out to its parent's right and bottom edges, repeating its edge
-    // pixels, so the frame would otherwise cover that margin.
-    wl_surface *filler = nullptr;
-    wl_subsurface *filler_subsurface = nullptr;
-    wp_viewport *filler_viewport = nullptr;
-    bool filler_mapped = false;
 
     // Surface size in logical pixels: the latest configure, and the size in use.
     int pending_w = 0, pending_h = 0;
     int width = 0, height = 0;
     bool configured = false;
-    bool pending_resizing = false, resizing = false; // the user is dragging the window's edge
-    // Where the frame on screen sits in the window, in logical pixels, and its size in pixels.
-    int content_x = 0, content_y = 0, content_w = 0, content_h = 0;
-    int frame_w = 0, frame_h = 0;
-    wl_buffer *blur = nullptr;
-    int blur_w = 0, blur_h = 0;
-    wl_buffer *backdrop = nullptr; // what the toplevel surface shows: the blur or a black pixel
-    bool blur_pending = false;
     int scale120 = 0; // 0 until the compositor sends a preferred scale
     std::set<wl_output *> outputs; // the monitors the window is on
 
@@ -132,7 +111,7 @@ struct Java {
     JNIEnv *env = nullptr;
     jobject bridge = nullptr;
     jmethodID createDisplay, displayId, resizeDisplay, releaseDisplay, launch, taskCount, removeTasks,
-            focusDisplay, injectMotion, injectKey, setRefreshRate, screenshot, requestBlur, takeBlur;
+            focusDisplay, injectMotion, injectKey, setRefreshRate, screenshot;
     jintArray ids = nullptr;
     jfloatArray xy = nullptr;
 
@@ -141,10 +120,8 @@ struct Java {
 
 extern Java java;
 
-// Window lookup for input handlers, which only see wl_surfaces: the toplevel surface, which
-// keyboard focus enters, and the frame's subsurface, which pointer and touch events hit.
+// Window lookup for input handlers, which only see wl_surfaces.
 Window *window_for_surface(wl_surface *surface);
-Window *window_for_content(wl_surface *surface);
 Window *window_by_id(uint32_t id);
 // Wakes the event loop; safe from any thread.
 void post(const Msg &msg);
@@ -158,5 +135,5 @@ void input_forget_window(const Window *w);
 void input_reset();
 int64_t input_next_deadline();
 void input_run_timers(int64_t now);
-// Maps a position on the frame's subsurface to the display's pixels, accounting for a pending resize.
+// Maps a surface position to the display's pixels, accounting for a pending resize.
 void window_to_display(const Window *w, double sx, double sy, float *x, float *y);
