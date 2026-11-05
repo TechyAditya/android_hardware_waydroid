@@ -3,6 +3,8 @@
 # decoders into Waydroid, runs the render server and the video decoder as
 # sandboxed system services and restarts a running Waydroid container to
 # apply the new properties.  On failure it restores everything it changed.
+# A built waydroid-app-displays checkout next to this one, or at
+# $WAYDROID_APP_DISPLAYS, is installed too.
 set -eEuo pipefail
 
 here=$(cd "$(dirname "$0")" && pwd)
@@ -185,6 +187,19 @@ for _ in $(seq 50); do
    sleep 0.2
 done
 [ -S "$socket_dir/alloc.sock" ]
+
+# waydroid-app-displays (https://github.com/TechyAditya/waydroid-app-displays) gives each app its
+# own window. It installs before the restart below, because Android reads its init file only at
+# boot. It isn't part of this transaction: a failure leaves this install in place.
+apps=${WAYDROID_APP_DISPLAYS:-$(dirname "$here")/waydroid-app-displays}
+if [ -f "$apps/build/out/appdisplay.jar" ]; then
+   "$apps/install.sh" || echo "waydroid-app-displays failed to install; run $apps/install.sh with sudo" >&2
+elif [ -d "$apps" ]; then
+   echo "waydroid-app-displays isn't built; run $apps/build.sh as $user, then this script again" >&2
+else
+   echo "for per-app windows, clone https://github.com/TechyAditya/waydroid-app-displays to $apps," \
+      "run its build.sh as $user, then this script again"
+fi
 
 # regenerates waydroid_base.prop and restarts a running container
 waydroid upgrade --offline
