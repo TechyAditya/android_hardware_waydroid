@@ -237,18 +237,27 @@ def cmd_launch(args):
         opts.append(f"dpi={args.dpi}")
     if args.hidden:
         opts.append("hidden=1")
-    line = " ".join(["launch", pkg, *opts, label(pkg)]).rstrip()
+    title = label(pkg)
     # The desktop entries' fallback ignores the options, so only a plain launch uses it.
     fallback = args.stock_fallback and not opts
+    # A service that isn't running yet starts from the installed version, which takes `--`.
+    version = 3
     try:
         before = window(pkg)
+        reply = request("version")
+        version = int(reply.split()[1]) if reply.startswith("ok ") else 1
         # A service without `version` would open a plain window titled with the options.
-        if opts:
-            checked("version")
+        if opts and version < 2:
+            raise Fail(STALE)
+    except OSError:
+        before = None
     except Fail as e:
         if e.args[0] == STALE:
             raise
         before = None
+    # From version 3 a `--` ends the options, so a title shaped like an option stays a title.
+    title_args = (["--", title] if version >= 3 else [title]) if title else []
+    line = " ".join(["launch", pkg, *opts, *title_args])
     try:
         reply = request(line)
     except OSError:

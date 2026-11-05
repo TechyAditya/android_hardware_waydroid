@@ -47,8 +47,9 @@ void post(const Msg &msg) {
 
 namespace {
 
-// The control commands' version, which `version` reports; 2 added launch options and screenshots.
-constexpr int kProtocolVersion = 2;
+// The control commands' version, which `version` reports; 2 added launch options and
+// screenshots, 3 the `--` before a launch's title.
+constexpr int kProtocolVersion = 3;
 constexpr int kImages = 4;
 constexpr int kDefaultWidth = 1280, kDefaultHeight = 800;
 // A hidden display launched without a size is a phone, about 393 dp wide.
@@ -892,11 +893,16 @@ bool parse_int(const std::string &s, int lo, int hi, int *out) {
     return true;
 }
 
-// Reads `size=WxH`, `dpi=N` and `hidden=1` from the front of `rest`; what follows is the title.
+// Reads `size=WxH`, `dpi=N` and `hidden=1` from the front of `rest`; what follows them, or a
+// `--` after them, is the title, so a title shaped like an option stays a title.
 // Returns an error message, or "" if the options are valid.
 std::string parse_options(std::string &rest, LaunchOptions *o) {
     for (;;) {
         std::string token = rest.substr(0, rest.find(' '));
+        if (token == "--") {
+            rest = rest.size() > token.size() ? rest.substr(token.size() + 1) : "";
+            return "";
+        }
         size_t eq = token.find('=');
         std::string key = token.substr(0, eq), value = eq == std::string::npos ? "" : token.substr(eq + 1);
         if (key == "size" && eq != std::string::npos) {

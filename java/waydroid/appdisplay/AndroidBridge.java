@@ -45,6 +45,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /** Android-side operations the native event loop calls into. All methods run on the loop thread. */
 final class AndroidBridge {
@@ -273,6 +274,7 @@ final class AndroidBridge {
     // ---- Screenshots ----
 
     private static final long CAPTURE_TIMEOUT_MS = 3000;
+    private static final AtomicInteger CAPTURES = new AtomicInteger();
 
     /**
      * Saves the display's content as a PNG under DIR/captures on a worker thread, then writes
@@ -360,7 +362,8 @@ final class AndroidBridge {
         File dir = new File(Main.DIR, "captures");
         if (!dir.isDirectory() && !dir.mkdirs())
             throw new IOException("can't create " + dir);
-        File file = new File(dir, pkg + "-" + System.currentTimeMillis() + ".png");
+        // Screenshots of one app can run at the same time, within the same millisecond.
+        File file = new File(dir, pkg + "-" + System.currentTimeMillis() + "-" + CAPTURES.incrementAndGet() + ".png");
         File part = new File(dir, "." + file.getName() + ".part");
         try (FileOutputStream out = new FileOutputStream(part)) {
             if (!bitmap.compress(Bitmap.CompressFormat.PNG, 100, out))
