@@ -340,6 +340,275 @@ def cmd_screenshot(args):
     print(out)
 
 
+MEDIA_SOCKET = os.path.join(ANDROID_DATA, "waydroid-app-displays", "media.sock")
+MPRIS_PATH = "/org/mpris/MediaPlayer2"
+MPRIS_ROOT = "org.mpris.MediaPlayer2"
+MPRIS_PLAYER = "org.mpris.MediaPlayer2.Player"
+MPRIS_XML = """<node>
+ <interface name="org.mpris.MediaPlayer2">
+  <method name="Raise"/>
+  <method name="Quit"/>
+  <property name="CanQuit" type="b" access="read"/>
+  <property name="CanRaise" type="b" access="read"/>
+  <property name="HasTrackList" type="b" access="read"/>
+  <property name="Identity" type="s" access="read"/>
+  <property name="DesktopEntry" type="s" access="read"/>
+  <property name="SupportedUriSchemes" type="as" access="read"/>
+  <property name="SupportedMimeTypes" type="as" access="read"/>
+ </interface>
+ <interface name="org.mpris.MediaPlayer2.Player">
+  <method name="Next"/>
+  <method name="Previous"/>
+  <method name="Pause"/>
+  <method name="PlayPause"/>
+  <method name="Stop"/>
+  <method name="Play"/>
+  <method name="Seek"><arg name="Offset" type="x" direction="in"/></method>
+  <method name="SetPosition">
+   <arg name="TrackId" type="o" direction="in"/><arg name="Position" type="x" direction="in"/>
+  </method>
+  <method name="OpenUri"><arg name="Uri" type="s" direction="in"/></method>
+  <signal name="Seeked"><arg name="Position" type="x"/></signal>
+  <property name="PlaybackStatus" type="s" access="read"/>
+  <property name="Rate" type="d" access="readwrite"/>
+  <property name="Metadata" type="a{sv}" access="read"/>
+  <property name="Volume" type="d" access="readwrite"/>
+  <property name="Position" type="x" access="read"/>
+  <property name="MinimumRate" type="d" access="read"/>
+  <property name="MaximumRate" type="d" access="read"/>
+  <property name="CanGoNext" type="b" access="read"/>
+  <property name="CanGoPrevious" type="b" access="read"/>
+  <property name="CanPlay" type="b" access="read"/>
+  <property name="CanPause" type="b" access="read"/>
+  <property name="CanSeek" type="b" access="read"/>
+  <property name="CanControl" type="b" access="read"/>
+ </interface>
+</node>"""
+# android.media.session.PlaybackState.ACTION_*
+ACTION_STOP, ACTION_PAUSE, ACTION_PLAY = 1, 2, 4
+ACTION_PREVIOUS, ACTION_NEXT, ACTION_SEEK, ACTION_PLAY_PAUSE = 16, 32, 256, 512
+# A reported position this far from the extrapolated one means the app seeked.
+SEEK_THRESHOLD_US = 1_500_000
+RECONNECT_SECONDS = 3
+
+
+def media_control(session_id, action, ms=None):
+    line = f"control {session_id} {action}" + (f" {int(ms)}" if ms is not None else "")
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
+            s.settimeout(3)
+            s.connect(MEDIA_SOCKET)
+            s.sendall(line.encode() + b"\n")
+            reply = s.recv(4096).decode().strip()
+    except OSError as e:
+        reply = f"error {e}"
+    if reply != "ok":
+        print(f"mpris: {line}: {reply}", file=sys.stderr)
+
+
+def bus_name_part(text):
+    """Turns a package into bus name elements: letters, digits and _, never starting with a digit."""
+    parts = [re.sub(r"[^A-Za-z0-9_]", "_", p) or "_" for p in text.split(".")]
+    return ".".join("_" + p if p[0].isdigit() else p for p in parts)
+
+
+class MprisPlayer:
+    """One Android media session as an MPRIS player, on a D-Bus connection of its own: clients
+    tell players apart by the connection that sends their signals."""
+
+    def __init__(self, Gio, GLib, address, session, name):
+        self.Gio, self.GLib = Gio, GLib
+        self.id = session["id"]
+        self.package = session["package"]
+        self.identity = label(self.package) or self.package
+        self.track = 0
+        self.session = {}
+        self.base_us, self.base_time, self.rate = 0, time.monotonic(), 0.0
+        self.conn = Gio.DBusConnection.new_for_address_sync(
+            address, Gio.DBusConnectionFlags.AUTHENTICATION_CLIENT | Gio.DBusConnectionFlags.MESSAGE_BUS_CONNECTION,
+            None, None)
+        for iface in Gio.DBusNodeInfo.new_for_xml(MPRIS_XML).interfaces:
+            self.conn.register_object(MPRIS_PATH, iface, self.on_call, self.on_get, self.on_set)
+        self.update(session)
+        self.owner = Gio.bus_own_name_on_connection(self.conn, name, Gio.BusNameOwnerFlags.NONE, None, None)
+
+    def close(self):
+        self.Gio.bus_unown_name(self.owner)
+        self.conn.close_sync(None)
+
+    # ---- State ----
+
+    def position_us(self):
+        us = self.base_us + (time.monotonic() - self.base_time) * self.rate * 1e6
+        length = self.session.get("duration_ms", 0) * 1000
+        return int(min(us, length) if length > 0 else us)
+
+    def track_path(self):
+        return f"/org/waydroid/track/{self.id}_{self.track}"
+
+    def metadata(self):
+        V, s = self.GLib.Variant, self.session
+        m = {"mpris:trackid": V("o", self.track_path())}
+        if s.get("duration_ms", 0) > 0:
+            m["mpris:length"] = V("x", s["duration_ms"] * 1000)
+        if s.get("art"):
+            m["mpris:artUrl"] = V("s", "file://" + os.path.join(ANDROID_DATA, s["art"][len("/data/"):]))
+        elif s.get("art_url"):
+            m["mpris:artUrl"] = V("s", s["art_url"])
+        for key, field in (("xesam:title", "title"), ("xesam:album", "album")):
+            if s.get(field):
+                m[key] = V("s", s[field])
+        if s.get("artist"):
+            m["xesam:artist"] = V("as", [s["artist"]])
+        return m
+
+    def player_props(self):
+        V, actions = self.GLib.Variant, self.session.get("actions", 0)
+        status = {"playing": "Playing", "paused": "Paused"}.get(self.session.get("status"), "Stopped")
+        return {
+            "PlaybackStatus": V("s", status),
+            "Metadata": V("a{sv}", self.metadata()),
+            "CanGoNext": V("b", bool(actions & ACTION_NEXT)),
+            "CanGoPrevious": V("b", bool(actions & ACTION_PREVIOUS)),
+            "CanPlay": V("b", bool(actions & (ACTION_PLAY | ACTION_PLAY_PAUSE))),
+            "CanPause": V("b", bool(actions & (ACTION_PAUSE | ACTION_PLAY_PAUSE))),
+            "CanSeek": V("b", bool(actions & ACTION_SEEK)),
+        }
+
+    def update(self, session):
+        old = self.player_props() if self.session else {}
+        track_keys = ("title", "artist", "album", "duration_ms")
+        new_track = any(session.get(k) != self.session.get(k) for k in track_keys)
+        if new_track and self.session:
+            self.track += 1
+        expected = self.position_us()
+        self.session = session
+        self.base_us, self.base_time = session.get("position_ms", 0) * 1000, time.monotonic()
+        self.rate = session.get("speed", 0.0)
+        new = self.player_props()
+        changed = {k: v for k, v in new.items() if k not in old or not v.equal(old[k])}
+        if old and changed:
+            self.conn.emit_signal(None, MPRIS_PATH, "org.freedesktop.DBus.Properties", "PropertiesChanged",
+                                  self.GLib.Variant("(sa{sv}as)", (MPRIS_PLAYER, changed, [])))
+        if old and not new_track and abs(self.base_us - expected) > SEEK_THRESHOLD_US:
+            self.conn.emit_signal(None, MPRIS_PATH, MPRIS_PLAYER, "Seeked", self.GLib.Variant("(x)", (self.base_us,)))
+
+    # ---- D-Bus ----
+
+    def on_get(self, conn, sender, path, iface, prop):
+        V = self.GLib.Variant
+        if iface == MPRIS_ROOT:
+            return {
+                "CanQuit": V("b", False), "CanRaise": V("b", True), "HasTrackList": V("b", False),
+                "Identity": V("s", self.identity), "DesktopEntry": V("s", f"waydroid.{self.package}"),
+                "SupportedUriSchemes": V("as", []), "SupportedMimeTypes": V("as", []),
+            }.get(prop)
+        if prop == "Position":
+            return V("x", self.position_us())
+        if prop in ("Rate", "MinimumRate", "MaximumRate", "Volume"):
+            return V("d", 1.0)
+        if prop == "CanControl":
+            return V("b", True)
+        return self.player_props().get(prop)
+
+    def on_set(self, conn, sender, path, iface, prop, value):
+        return True  # Rate and Volume stay at 1
+
+    def on_call(self, conn, sender, path, iface, method, params, invocation):
+        actions = {"Play": "play", "Pause": "pause", "PlayPause": "playpause", "Stop": "stop",
+                   "Next": "next", "Previous": "previous"}
+        if method in actions:
+            media_control(self.id, actions[method])
+        elif method == "Seek":
+            media_control(self.id, "seek", max(0, self.position_us() + params[0]) / 1000)
+        elif method == "SetPosition":
+            if params[0] == self.track_path():
+                media_control(self.id, "seek", max(0, params[1]) / 1000)
+        elif method == "Raise":
+            subprocess.Popen([os.path.realpath(__file__), "launch", "--quiet", self.package],
+                             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, start_new_session=True)
+        invocation.return_value(None)
+
+
+def cmd_mpris(args):
+    import gi
+    gi.require_version("Gio", "2.0")
+    from gi.repository import Gio, GLib
+
+    address = Gio.dbus_address_get_for_bus_sync(Gio.BusType.SESSION, None)
+    players = {}
+    state = {"sock": None, "buf": b"", "watch": 0}
+
+    def sync(sessions):
+        seen = set()
+        counts = {}
+        for s in sessions:
+            counts[s["package"]] = counts.get(s["package"], 0) + 1
+        for s in sessions:
+            seen.add(s["id"])
+            if s["id"] in players:
+                players[s["id"]].update(s)
+                continue
+            name = "org.mpris.MediaPlayer2.waydroid." + bus_name_part(s["package"])
+            if counts[s["package"]] > 1:
+                name += f".instance{s['id']}"
+            try:
+                players[s["id"]] = MprisPlayer(Gio, GLib, address, s, name)
+            except GLib.Error as e:
+                print(f"mpris: can't publish {s['package']}: {e.message}", file=sys.stderr)
+        for gone in [i for i in players if i not in seen]:
+            players.pop(gone).close()
+
+    def disconnect():
+        if state["watch"]:
+            GLib.source_remove(state["watch"])
+            state["watch"] = 0
+        if state["sock"]:
+            state["sock"].close()
+            state["sock"] = None
+        sync([])
+        GLib.timeout_add_seconds(RECONNECT_SECONDS, connect)
+
+    def readable(fd, condition):
+        try:
+            data = state["sock"].recv(65536)
+        except BlockingIOError:
+            return True
+        except OSError:
+            data = b""
+        if not data:
+            state["watch"] = 0
+            disconnect()
+            return False
+        state["buf"] += data
+        *lines, state["buf"] = state["buf"].split(b"\n")
+        if lines:
+            try:
+                sync(json.loads(lines[-1]).get("sessions", []))
+            except ValueError as e:
+                print(f"mpris: bad snapshot: {e}", file=sys.stderr)
+        return True
+
+    def connect():
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            s.settimeout(3)
+            s.connect(MEDIA_SOCKET)
+            s.sendall(b"watch\n")
+        except OSError:
+            s.close()
+            return True  # Waydroid isn't running; try again later
+        s.setblocking(False)
+        state["sock"], state["buf"] = s, b""
+        state["watch"] = GLib.io_add_watch(s.fileno(), GLib.IO_IN | GLib.IO_HUP | GLib.IO_ERR, readable)
+        print("mpris: connected to the media bridge", file=sys.stderr)
+        return False
+
+    if connect():
+        GLib.timeout_add_seconds(RECONNECT_SECONDS, connect)
+    GLib.MainLoop().run()
+
+
 def main():
     p = argparse.ArgumentParser(prog="waydroid-app-displays", description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -383,6 +652,10 @@ def main():
     s = sub.add_parser("focus", help="send keyboard input to an app's display, such as a hidden one")
     s.add_argument("package")
     s.set_defaults(func=cmd_focus)
+
+    s = sub.add_parser("mpris", help="publish Android's media sessions as MPRIS players; "
+                                     "waydroid-app-displays-mpris.service runs it")
+    s.set_defaults(func=cmd_mpris)
 
     args = p.parse_args()
     try:

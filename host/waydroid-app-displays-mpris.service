@@ -1,0 +1,10 @@
+[Unit]
+Description=Show Waydroid's media sessions as MPRIS players
+
+[Service]
+ExecStart=/usr/local/bin/waydroid-app-displays mpris
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

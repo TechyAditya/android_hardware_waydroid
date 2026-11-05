@@ -13,6 +13,8 @@ data=$home/.local/share/waydroid/data/waydroid-app-displays
 rc=/var/lib/waydroid/overlay/vendor/etc/init/waydroid-app-displays.rc
 hook=/usr/local/bin/waydroid
 cli=/usr/local/bin/waydroid-app-displays
+units=/usr/local/lib/systemd/user
+unit=waydroid-app-displays-mpris.service
 restart=0
 [ "${1:-}" = --restart ] && restart=1
 
@@ -44,11 +46,33 @@ done
 install -D -m 644 "$here/android/waydroid-app-displays.rc" "$rc"
 install -m 755 "$here/host/waydroid-app-displays" "$cli"
 install -m 755 "$here/host/waydroid" "$hook"
+install -D -m 644 "$here/host/$unit" "$units/$unit"
 # Earlier versions kept the launcher here.
 rm -rf /usr/local/lib/waydroid-app-displays
-echo "installed; Android starts the service at boot"
+echo "installed; Android starts the services at boot"
+
+# The MPRIS bridge runs in the user's systemd instance, which needs their runtime directory.
+uid=$(id -u "$user")
+user_systemctl() {
+   runuser -u "$user" -- env XDG_RUNTIME_DIR="/run/user/$uid" \
+      DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$uid/bus" systemctl --user "$@"
+}
+if [ -d "/run/user/$uid" ] && user_systemctl daemon-reload; then
+   user_systemctl enable "$unit" > /dev/null 2>&1
+   user_systemctl restart "$unit"
+   echo "started $unit"
+else
+   echo "$user has no systemd user instance running; $unit starts at their next login"
+   runuser -u "$user" -- mkdir -p "$home/.config/systemd/user/default.target.wants"
+   runuser -u "$user" -- ln -sf "$units/$unit" "$home/.config/systemd/user/default.target.wants/$unit"
+fi
 
 if waydroid status 2> /dev/null | grep -q $'^Container:\tRUNNING'; then
+   # The media bridge has no windows, so it always restarts.
+   waydroid shell -- sh -c 'pid=$(pidof waydroid-app-media) && kill $pid' > /dev/null 2>&1 || true
+   waydroid shell -- sh -c 'CLASSPATH=/data/waydroid-app-displays/appdisplay.jar setsid /system/bin/app_process \
+      /system/bin --nice-name=waydroid-app-media waydroid.appdisplay.Media > /dev/null 2>&1 < /dev/null &'
+   echo "started the media bridge"
    if [ -n "$(waydroid shell -- pidof waydroid-app-displays 2> /dev/null)" ]; then
       [ "$restart" = 1 ] || { echo "the running service keeps its old version until --restart"; exit 0; }
       echo "restarting the service; its windows close"

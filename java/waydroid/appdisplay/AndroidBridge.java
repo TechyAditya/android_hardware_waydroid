@@ -539,7 +539,7 @@ final class AndroidBridge {
     }
 
     /** The minimum a framework manager needs to act as the system package. */
-    private static final class SystemContext extends ContextWrapper {
+    static final class SystemContext extends ContextWrapper {
         SystemContext() {
             super(null);
         }
@@ -562,6 +562,17 @@ final class AndroidBridge {
         @Override
         public Context getApplicationContext() {
             return this;
+        }
+
+        // Hidden Context method; MediaSessionManager asks for the user.
+        public int getUserId() {
+            return 0;
+        }
+
+        // MediaSessionManager looks up services it only uses for features this service skips.
+        @Override
+        public Object getSystemService(String name) {
+            return null;
         }
     }
 }
