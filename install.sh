@@ -67,7 +67,10 @@ else
    runuser -u "$user" -- ln -sf "$units/$unit" "$home/.config/systemd/user/default.target.wants/$unit"
 fi
 
-if waydroid status 2> /dev/null | grep -q $'^Container:\tRUNNING'; then
+if waydroid status 2> /dev/null | grep -q $'^Container:\tRUNNING' &&
+   [ "$(waydroid shell -- getprop sys.boot_completed 2> /dev/null | tr -d '\r')" != 1 ]; then
+   echo "Android is still booting; it starts the services when it's done"
+elif waydroid status 2> /dev/null | grep -q $'^Container:\tRUNNING'; then
    # The media bridge has no windows, so it always restarts.
    waydroid shell -- sh -c 'pid=$(pidof waydroid-app-media) && kill $pid' > /dev/null 2>&1 || true
    waydroid shell -- sh -c 'CLASSPATH=/data/waydroid-app-displays/appdisplay.jar setsid /system/bin/app_process \
