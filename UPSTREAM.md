@@ -9,6 +9,8 @@ What this fork plans to send to Waydroid, in plain words. Open so far: [#92](htt
 5. **No audio crackles at high sample rates.** Posted as [a comment](https://github.com/waydroid/android_hardware_waydroid/pull/91#issuecomment-6618281541) on [#91](https://github.com/waydroid/android_hardware_waydroid/pull/91), someone else's open audio PR, which already has half of the fix. [Draft](#5-audio-at-high-sample-rates)
 6. **Video buffers in GPU memory go straight to the compositor.** On hold: upstream has nothing that creates those buffers yet. [Note](#6-gpu-memory-buffers-as-dma-bufs)
 7. **Bug report to NVIDIA.** Their driver misreads some video buffers, which shows as green or colourless frames. Posted as [forum thread 387942](https://forums.developer.nvidia.com/t/vulkan-some-nv12-dma-bufs-imported-as-two-plane-images-read-back-wrong-615-78-08/387942), with a small program that shows the bug. [Draft](#7-nvidia-misreads-two-plane-nv12-imports)
+8. **Android media players in the desktop's media controls.** Apple Music, YouTube and other players show in the desktop's media widget with their title, cover and position, and take play, pause, skip and seek. Requested in [waydroid#868](https://github.com/waydroid/waydroid/issues/868) since 2023. Two PRs, one in `android_frameworks_waydroid` and one in `waydroid/waydroid`, built the way Waydroid already forwards notifications. Not written yet; the fork's working version runs as a separate helper, which upstream would not take as it is. [Plan](#8-media-controls-over-mpris)
+
 Every head branch below starts from upstream `lineage-20` and is on `TechyAditya/android_hardware_waydroid` unless it says otherwise. Each one compiles alone with `stack/build.sh`. The changes ran together in the `all-fixes` build, not branch by branch. To open a pull request from a draft, save the body to a file and run:
 
 ```sh
@@ -379,3 +381,20 @@ Waydroid's compositor reads Android's video buffers this way through Venus, so s
 - FFmpeg commit [bdc07f3](https://ffmpeg.org/pipermail/ffmpeg-cvslog/2025-March/147590.html) says NV12 images map into CUDA wrong when one memory object holds both planes, and that it was reported to NVIDIA. That is Vulkan export to CUDA, not dma-buf import, but the pattern is the same: two planes in one image fail, and separate planes work.
 - [Thread 371199](https://forums.developer.nvidia.com/t/nvidia-vulkan-vkimagedrmformatmodifierexplicitcreateinfoext-rejects-nv12-layouts-that-the-list-based-path-accepts/371199) reports that `vkCreateImage` rejects these NV12 buffers when the plane layout is given explicitly. Here the import succeeds and the data is wrong: at 1920x1080 and 2560x1440 with an explicit layout and with a modifier list, and at the small sizes above with an explicit layout only.
 ````
+
+## 8. Media controls over MPRIS
+
+[waydroid#868](https://github.com/waydroid/waydroid/issues/868) asks for Android's media players on the host's MPRIS interface. It is open, and its last answers point to KDE Connect as a workaround. The fork's `waydroid-app-displays` does it today with a separate `app_process` helper and a socket in `/data`. Upstream would build it the way it forwards notifications, so the PRs are a port, not a copy:
+
+- **`waydroid/android_frameworks_waydroid`**, like [`5c6283d`](https://github.com/waydroid/android_frameworks_waydroid/commit/5c6283dbe205e82cc893338c8fffc9fb46411871) "WayDroidService: Add notification manager". A new `IMediaPlayers.aidl` and `MediaPlayers.java` client, and in `WayDroidService` a `MediaSessionManager` listener for active sessions with a `MediaController.Callback` on each. It sends the package, title, artist, album, length, playback state, position, and a scaled cover to the host. A host callback runs play, pause, next, previous, seek, and raise through `MediaController.TransportControls`. The repository has taken no pull requests so far, so ask on #868 how the maintainer wants it.
+- **`waydroid/waydroid`**, like [`21da80c`](https://github.com/waydroid/waydroid/commit/21da80c) "services: Add new notification manager". `tools/interfaces/IMediaPlayers.py` and `tools/services/media_manager.py`, which publish one `org.mpris.MediaPlayer2.waydroid.PACKAGE` player per session on the session bus with `DesktopEntry` `waydroid.PACKAGE`, through dbus-python as `notification_manager.py` does.
+
+Testing: the host service can run against the fork's helper speaking the same binder interface. The `WayDroidService` part runs only in a system image built with it, so it would compile against the framework but run untested, the same as the other PRs that were built outside AOSP.
+
+### Comment on #868
+
+```markdown
+I have this working on Waydroid 1.6.3 with the LineageOS 20 images, as a separate helper for now: https://github.com/TechyAditya/waydroid-app-displays (`Media.java`, `MediaSessions.java` and the `mpris` command). Apple Music and YouTube show in the desktop's media controls with title, cover and position, and play, pause, skip and seek work. Tested on Hyprland with Noctalia's media widget.
+
+I'd like to send it upstream in the shape of the notification forwarding: a media session listener in `WayDroidService` (android_frameworks_waydroid, like 5c6283d) and a `media_manager` service that publishes MPRIS players (waydroid, like 21da80c). @aleasto, would you take pull requests to android_frameworks_waydroid for this, or would you rather review a patch another way?
+```
