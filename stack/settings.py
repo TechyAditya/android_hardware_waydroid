@@ -20,8 +20,8 @@ SETTINGS = {
     "properties": {
         # The composer's default, written so that an earlier `true` doesn't stay.
         "persist.waydroid.multi_windows": "false",
-        # Reconnect the main display at most every 500 ms while its window is resized (#92).
-        "persist.waydroid.resize_interval_ms": "500",
+        # Reconnect the main display at most every 150 ms while its window is resized (#92).
+        "persist.waydroid.resize_interval_ms": "150",
         # Android's Codec2 codecs, which screen recording and scrcpy encode with. Waydroid sets 0
         # when it falls back to software rendering, as it does on NVIDIA.
         "debug.stagefright.ccodec": "4",
