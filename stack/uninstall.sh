@@ -1,5 +1,6 @@
 #!/bin/bash
-# Puts back the overlay files that stack/install.sh replaced, and removes the ones it added.
+# Puts back the overlay files and waydroid.cfg settings that stack/install.sh replaced, and
+# removes the ones it added.
 # Run with: sudo stack/uninstall.sh, then restart Waydroid (waydroid session stop).
 set -euo pipefail
 
@@ -8,6 +9,7 @@ HERE=$(cd "$(dirname "$0")" && pwd)
 "$HERE/surfaceflinger.sh" uninstall
 overlay=/var/lib/waydroid/overlay/vendor
 backup=/var/lib/waydroid/all-fixes-backup
+cfg=/var/lib/waydroid/waydroid.cfg
 [[ -f $backup/manifest ]] || { echo "Nothing to uninstall: $backup/manifest not found." >&2; exit 1; }
 
 while read -r state rel; do
@@ -16,6 +18,11 @@ while read -r state rel; do
         absent) rm -f "$overlay/$rel"; echo "removed vendor/$rel" ;;
     esac
 done < "$backup/manifest"
+if [[ -f $backup/settings.json ]]; then
+    changed=$(python3 "$HERE/settings.py" uninstall "$cfg" "$backup/settings.json")
+    echo "$changed"
+    [[ $changed != "restored "* ]] || waydroid upgrade --offline
+fi
 rm -rf "$backup"
 
 echo "Restart Waydroid to load them: waydroid session stop"
