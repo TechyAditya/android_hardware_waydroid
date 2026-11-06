@@ -37,6 +37,10 @@ SETTLE_TIMEOUT = 3
 STALE = ("the running service is older than this command; run `sudo ./install.sh --restart` "
          "in the waydroid-app-displays checkout, or restart Waydroid")
 SIZE_RE = re.compile(r"^[0-9]+x[0-9]+$")
+# Chromium-based browsers, which serve DevTools on the chrome_devtools_remote socket.
+CHROMIUM = {"org.cromite.cromite", "org.chromium.chrome", "com.android.chrome", "com.chrome.beta",
+            "com.brave.browser", "com.kiwibrowser.browser", "com.microsoft.emmx", "org.bromite.bromite"}
+DEVTOOLS_PORT = 9333
 LIST_RE = re.compile(r"^(\S+) display=(-?\d+) (\d+)x(\d+) dpi=(\d+)(?: hidden=(\d))?(?: window=(\d+)x(\d+))?"
                      r"(?: fixed=(\d+)x(\d+) fixed_dpi=(\d+))?")
 
@@ -154,15 +158,33 @@ def commands(w, serial):
                     "a window you can also click and type into; closing it leaves the app running"))
     see.append(("record", f"{scrcpy} --display-id={d} --no-window --no-audio --no-control "
                 f"--record=/tmp/{pkg}.mp4 --time-limit=10", "H.264 MP4; Ctrl-C stops early"))
-    return [
+    sections = [
         ("See it", see),
         (f"Control it (display pixels, {width}x{height})", [
             ("tap", f"{adb} shell input -d {d} tap {width // 2} {height // 2}", ""),
             ("swipe", f"{adb} shell input -d {d} swipe {width // 2} {height * 3 // 4} {width // 2} {height // 4} 300",
              "scrolls down"),
             ("type", f"{adb} shell input -d {d} text 'hello%sworld'", "%s is a space; tap a text field first"),
-            ("key", f"{adb} shell input -d {d} keyevent KEYCODE_BACK", "also KEYCODE_ENTER, KEYCODE_TAB"),
+            ("key", f"{adb} shell input -d {d} keyevent KEYCODE_BACK",
+             "closes an open dialog, otherwise goes back a page; also KEYCODE_ENTER, KEYCODE_TAB"),
         ]),
+        ("Open a page", [
+            ("open url", f"{adb} shell am start --display {d} -a android.intent.action.VIEW -d https://example.com {q}",
+             "opens a link or deep link in the app; in a browser, a new tab"),
+            ("host server", f"{adb} reverse tcp:8000 tcp:8000",
+             "then open http://127.0.0.1:8000/; the host bridge 192.168.240.1 answers ping, but nftables "
+             "blocks its TCP ports. Undo with: adb reverse --remove tcp:8000"),
+            ("light mode", f"{adb} shell cmd uimode night no",
+             "with night mode on, browsers force-darken every page; this changes all of Android, so "
+             "switch back with: cmd uimode night yes"),
+        ]),
+    ]
+    if pkg in CHROMIUM:
+        sections.append(("Drive the browser over DevTools", [
+            ("devtools", f"{adb} forward tcp:{DEVTOOLS_PORT} localabstract:chrome_devtools_remote",
+             f"targets at http://127.0.0.1:{DEVTOOLS_PORT}/json. Undo with: adb forward --remove tcp:{DEVTOOLS_PORT}"),
+        ]))
+    sections += [
         ("Inspect it", [
             ("activities", f"{adb} shell dumpsys activity activities | grep -A12 'Display #{d} '", ""),
             ("logs", f"{adb} logcat --pid=\"$({adb} shell pidof -s {q})\"", "while the app runs"),
@@ -175,6 +197,26 @@ def commands(w, serial):
             ("close", f"{me} close {q}", ""),
         ]),
     ]
+    return sections
+
+
+def notes(w):
+    width, height = w["width"], w["height"]
+    out = [
+        "The display id changes when the app is closed and launched again.",
+        f"The display has no status or navigation bar, so the app's content reaches y {height}.",
+        "The on-screen keyboard doesn't open on these displays, so keyboard overlap is untested; "
+        "type with `type` or a physical keyboard.",
+    ]
+    if w["package"] in CHROMIUM:
+        out += [
+            "To open a new tab, use `open url`: Cromite refuses DevTools' /json/new.",
+            "Leave out DevTools' Emulation.setAutoDarkModeOverride: even with enabled: false it forces "
+            "dark mode. Use `light mode` instead.",
+            f"To tap a page point (cssX, cssY), tap x = cssX * s, y = {height} - innerHeight * s + cssY * s, "
+            f"where s = {width} / innerWidth. The toolbar hides on scroll, so read innerHeight before every tap.",
+        ]
+    return out
 
 
 def print_info(w, serial, as_json):
@@ -183,12 +225,14 @@ def print_info(w, serial, as_json):
         print(json.dumps({
             **w, "serial": serial,
             "commands": {name: cmd for _, rows in sections for name, cmd, _ in rows},
+            "notes": notes(w),
         }, indent=2))
         return
     where = "hidden, no window" if w["hidden"] else "in a window"
     print(f"{w['package']}: Android display {w['display_id']}, {w['width']}x{w['height']} px at {w['dpi']} dpi ({where})")
     print(f"adb serial: {serial}" if serial else "adb serial: unknown (adb missing or Waydroid has no IP address)")
-    print("The display id changes when the app is closed and launched again.")
+    for line in notes(w):
+        print(line)
     for title, rows in sections:
         print(f"\n{title}")
         width = max(len(name) for name, _, _ in rows)
