@@ -24,7 +24,7 @@ public final class Main {
         AndroidBridge bridge = new AndroidBridge();
         String runtimeDir = AndroidBridge.prop("waydroid.xdg_runtime_dir", "/run/xdg");
         String waylandDisplay = AndroidBridge.prop("waydroid.wayland_display", "wayland-0");
-        int resizeIntervalMs = Integer.parseInt(AndroidBridge.prop("persist.waydroid.resize_interval_ms", "500"));
+        int resizeIntervalMs = Integer.parseInt(AndroidBridge.prop("persist.waydroid.resize_interval_ms", "150"));
         int density = Integer.parseInt(AndroidBridge.prop("persist.waydroid.app_display_density",
                 AndroidBridge.prop("ro.sf.lcd_density", "240")));
 

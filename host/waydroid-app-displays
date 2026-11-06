@@ -31,7 +31,7 @@ SHOTS = "/tmp/waydroid-app-displays"
 START_TIMEOUT = 90
 # A window gets its display once the compositor has sized and scaled it.
 DISPLAY_TIMEOUT = 15
-# Longer than the service's default resize_interval_ms of 500, which delays a second resize.
+# Longer than the service's default resize_interval_ms of 150, which delays a second resize.
 SETTLE_INTERVAL = 0.7
 SETTLE_TIMEOUT = 3
 STALE = ("the running service is older than this command; run `sudo ./install.sh --restart` "
