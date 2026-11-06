@@ -1,0 +1,669 @@
+#!/usr/bin/env python3
+# managed-by: waydroid-app-displays
+"""Opens Android apps in their own windows and Android displays, and shows how to debug them.
+
+`launch` prints, once, the commands that capture, record, drive and inspect the app's display.
+`--hidden` runs the app on a display with no window, for agents and scripts.
+
+Launching an open app again applies that launch's options, and what it leaves out goes back to
+the default. So a plain launch, such as the app's start menu entry, shows a hidden app in a
+normal window, and its display follows the window and the system's scale again.
+"""
+
+import argparse
+import json
+import os
+import re
+import shlex
+import shutil
+import socket
+import subprocess
+import sys
+import time
+
+WAYDROID = "/usr/bin/waydroid"
+DATA_HOME = os.environ.get("XDG_DATA_HOME") or os.path.expanduser("~/.local/share")
+# Android's /data is this host directory.
+ANDROID_DATA = os.path.join(DATA_HOME, "waydroid", "data")
+SOCKET = os.path.join(ANDROID_DATA, "waydroid-app-displays", "control.sock")
+SHOTS = "/tmp/waydroid-app-displays"
+# Waydroid needs about 20 s to boot Android; the service starts after that.
+START_TIMEOUT = 90
+# A window gets its display once the compositor has sized and scaled it.
+DISPLAY_TIMEOUT = 15
+# Longer than the service's default resize_interval_ms of 500, which delays a second resize.
+SETTLE_INTERVAL = 0.7
+SETTLE_TIMEOUT = 3
+STALE = ("the running service is older than this command; run `sudo ./install.sh --restart` "
+         "in the waydroid-app-displays checkout, or restart Waydroid")
+SIZE_RE = re.compile(r"^[0-9]+x[0-9]+$")
+LIST_RE = re.compile(r"^(\S+) display=(-?\d+) (\d+)x(\d+) dpi=(\d+)(?: hidden=(\d))?(?: window=(\d+)x(\d+))?"
+                     r"(?: fixed=(\d+)x(\d+) fixed_dpi=(\d+))?")
+
+
+class Fail(Exception):
+    pass
+
+
+def label(pkg):
+    path = os.path.join(DATA_HOME, "applications", f"waydroid.{pkg}.desktop")
+    try:
+        with open(path) as f:
+            for line in f:
+                if line.startswith("Name="):
+                    return line[5:].strip()
+    except OSError:
+        pass
+    return ""
+
+
+def request(line, timeout=5):
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
+        s.settimeout(timeout)
+        s.connect(SOCKET)
+        s.sendall(line.encode() + b"\n")
+        chunks = []
+        while chunk := s.recv(65536):
+            chunks.append(chunk)
+    return b"".join(chunks).decode().strip()
+
+
+def error(reply):
+    if reply == "error unknown command":
+        return Fail(STALE)
+    return Fail(reply[len("error"):].strip())
+
+
+def checked(line, timeout=5):
+    try:
+        reply = request(line, timeout)
+    except OSError as e:
+        raise Fail(f"the service isn't reachable ({e}); is Waydroid running?")
+    if reply.startswith("error"):
+        raise error(reply)
+    return reply
+
+
+def waydroid_status():
+    return subprocess.run([WAYDROID, "status"], capture_output=True, text=True).stdout
+
+
+def session_running():
+    return "Session:\tRUNNING" in waydroid_status()
+
+
+def stock(pkg):
+    os.execv(WAYDROID, [WAYDROID, "app", "launch", pkg])
+
+
+def windows():
+    out = []
+    for line in checked("list").splitlines():
+        m = LIST_RE.match(line)
+        if m:
+            out.append({
+                "package": m[1], "display_id": int(m[2]), "width": int(m[3]), "height": int(m[4]),
+                "dpi": int(m[5]), "hidden": m[6] == "1",
+                "window": [int(m[7]), int(m[8])] if m[7] and m[6] != "1" else None,
+                # What the launch fixed; null where the display follows the window and system scale
+                "fixed_size": [int(m[9]), int(m[10])] if m[9] and m[9] != "0" else None,
+                "fixed_dpi": int(m[11]) if m[11] and m[11] != "0" else None,
+            })
+    return out
+
+
+def window(pkg):
+    for w in windows():
+        if w["package"] == pkg:
+            return w
+    return None
+
+
+def adb_serial():
+    """Waydroid's adb serial, connecting adb to it if needed; None without adb or an IP address."""
+    m = re.search(r"^IP address:\s*(\S+)", waydroid_status(), re.M)
+    if not m or not shutil.which("adb"):
+        return None
+    serial = f"{m[1]}:5555"
+    devices = subprocess.run(["adb", "devices"], capture_output=True, text=True).stdout
+    if not re.search(rf"^{re.escape(serial)}\s+device$", devices, re.M):
+        try:
+            subprocess.run(["adb", "connect", serial], capture_output=True, timeout=10)
+        except subprocess.TimeoutExpired:
+            pass  # the printed commands still name the serial
+    return serial
+
+
+def commands(w, serial):
+    """The debugging commands for a window's display, as (section, [(name, command, note)])."""
+    pkg, d, width, height = w["package"], w["display_id"], w["width"], w["height"]
+    q = shlex.quote(pkg)
+    adb = f"adb -s {serial}" if serial else "adb"
+    scrcpy = f"scrcpy -s {serial}" if serial else "scrcpy"
+    me = "waydroid-app-displays"
+    relaunch = f"{me} launch {q}"
+    if w["fixed_size"]:
+        relaunch += f" --size {w['fixed_size'][0]}x{w['fixed_size'][1]}"
+    if w["fixed_dpi"]:
+        relaunch += f" --dpi {w['fixed_dpi']}"
+    if w["hidden"]:
+        relaunch += " --hidden"
+    see = [("screenshot", f"{me} screenshot {q} -o /tmp/{pkg}.png", "PNG at full display resolution; -o - writes to stdout")]
+    if w["hidden"]:
+        see.append(("live view", f"{scrcpy} --display-id={d} --no-audio --window-title={q}",
+                    "a window you can also click and type into; closing it leaves the app running"))
+    see.append(("record", f"{scrcpy} --display-id={d} --no-window --no-audio --no-control "
+                f"--record=/tmp/{pkg}.mp4 --time-limit=10", "H.264 MP4; Ctrl-C stops early"))
+    return [
+        ("See it", see),
+        (f"Control it (display pixels, {width}x{height})", [
+            ("tap", f"{adb} shell input -d {d} tap {width // 2} {height // 2}", ""),
+            ("swipe", f"{adb} shell input -d {d} swipe {width // 2} {height * 3 // 4} {width // 2} {height // 4} 300",
+             "scrolls down"),
+            ("type", f"{adb} shell input -d {d} text 'hello%sworld'", "%s is a space; tap a text field first"),
+            ("key", f"{adb} shell input -d {d} keyevent KEYCODE_BACK", "also KEYCODE_ENTER, KEYCODE_TAB"),
+        ]),
+        ("Inspect it", [
+            ("activities", f"{adb} shell dumpsys activity activities | grep -A12 'Display #{d} '", ""),
+            ("logs", f"{adb} logcat --pid=\"$({adb} shell pidof -s {q})\"", "while the app runs"),
+        ]),
+        ("Manage it", [
+            *([("show", f"{me} launch {q}", "opens it in a normal window at the system's size and density; "
+                "so does its start menu entry")] if w["hidden"] else []),
+            ("relaunch", relaunch, "reuses the display if it's still open"),
+            ("info", f"{me} info {q}", "prints these commands again"),
+            ("close", f"{me} close {q}", ""),
+        ]),
+    ]
+
+
+def print_info(w, serial, as_json):
+    sections = commands(w, serial)
+    if as_json:
+        print(json.dumps({
+            **w, "serial": serial,
+            "commands": {name: cmd for _, rows in sections for name, cmd, _ in rows},
+        }, indent=2))
+        return
+    where = "hidden, no window" if w["hidden"] else "in a window"
+    print(f"{w['package']}: Android display {w['display_id']}, {w['width']}x{w['height']} px at {w['dpi']} dpi ({where})")
+    print(f"adb serial: {serial}" if serial else "adb serial: unknown (adb missing or Waydroid has no IP address)")
+    print("The display id changes when the app is closed and launched again.")
+    for title, rows in sections:
+        print(f"\n{title}")
+        width = max(len(name) for name, _, _ in rows)
+        for name, cmd, note in rows:
+            print(f"  {name:<{width}}  {cmd}")
+            if note:
+                print(f"  {'':<{width}}  # {note}")
+
+
+def wait_for_display(pkg):
+    deadline = time.monotonic() + DISPLAY_TIMEOUT
+    while True:
+        w = window(pkg)
+        if w is None:
+            raise Fail(f"{pkg} closed right after launch; it may have no launcher activity or have crashed "
+                       f"(adb logcat -s waydroid-app-displays)")
+        if w["display_id"] >= 0:
+            return w
+        if time.monotonic() > deadline:
+            raise Fail(f"{pkg} got no display within {DISPLAY_TIMEOUT} s")
+        time.sleep(0.1)
+
+
+def set_floating(pkg, floating):
+    """Floats or tiles the app's window in Hyprland. A fixed-size window floats when it opens,
+    but an open window keeps its state when the launch options change."""
+    if not os.environ.get("HYPRLAND_INSTANCE_SIGNATURE") or not shutil.which("hyprctl"):
+        return
+    match = "class:^" + re.escape(f"waydroid.{pkg}") + "$"
+    action = "enable" if floating else "disable"
+    lua = f'hl.dsp.window.float({{ action = "{action}", window = "{match.replace(chr(92), chr(92) * 2)}" }})'
+    out = subprocess.run(["hyprctl", "dispatch", lua], capture_output=True, text=True).stdout
+    if out.strip() != "ok":  # Hyprland without a Lua config
+        subprocess.run(["hyprctl", "dispatch", "setfloating" if floating else "settiled", match],
+                       capture_output=True)
+
+
+def cmd_launch(args):
+    pkg = args.package
+    opts = []
+    if args.size:
+        if not SIZE_RE.match(args.size):
+            raise Fail("--size must be WIDTHxHEIGHT in display pixels, such as 1080x2340")
+        opts.append(f"size={args.size}")
+    if args.dpi is not None:
+        opts.append(f"dpi={args.dpi}")
+    if args.hidden:
+        opts.append("hidden=1")
+    title = label(pkg)
+    # The desktop entries' fallback ignores the options, so only a plain launch uses it.
+    fallback = args.stock_fallback and not opts
+    # A service that isn't running yet starts from the installed version, which takes `--`.
+    version = 3
+    try:
+        before = window(pkg)
+        reply = request("version")
+        version = int(reply.split()[1]) if reply.startswith("ok ") else 1
+        # A service without `version` would open a plain window titled with the options.
+        if opts and version < 2:
+            raise Fail(STALE)
+    except OSError:
+        before = None
+    except Fail as e:
+        if e.args[0] == STALE:
+            raise
+        before = None
+    # From version 3 a `--` ends the options, so a title shaped like an option stays a title.
+    title_args = (["--", title] if version >= 3 else [title]) if title else []
+    line = " ".join(["launch", pkg, *opts, *title_args])
+    try:
+        reply = request(line)
+    except OSError:
+        if session_running():
+            if fallback:
+                stock(pkg)  # the service is disabled or not running
+            raise Fail("Waydroid is running but the service isn't; check `adb logcat -s waydroid-app-displays`")
+        subprocess.Popen([WAYDROID, "session", "start"], stdin=subprocess.DEVNULL,
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+        deadline = time.monotonic() + START_TIMEOUT
+        while True:
+            time.sleep(0.5)
+            try:
+                reply = request(line)
+                break
+            except OSError:
+                if time.monotonic() > deadline:
+                    if fallback:
+                        stock(pkg)
+                    raise Fail(f"the service didn't start within {START_TIMEOUT} s")
+    if not reply.startswith("ok"):
+        raise error(reply)
+    if before and not before["hidden"] and bool(before["fixed_size"]) != bool(args.size):
+        set_floating(pkg, bool(args.size))
+    if args.quiet:
+        return
+    w = wait_for_display(pkg)
+    # A window that sizes its display may be resized once the compositor places it.
+    deadline = time.monotonic() + SETTLE_TIMEOUT
+    while not args.size and not args.hidden and time.monotonic() < deadline:
+        time.sleep(SETTLE_INTERVAL)
+        now = window(pkg)
+        if now is None or (now["width"], now["height"]) == (w["width"], w["height"]):
+            break
+        w = now
+    print_info(w, adb_serial(), args.json)
+
+
+def cmd_info(args):
+    w = window(args.package)
+    if w is None:
+        raise Fail(f"{args.package} isn't open")
+    print_info(w, adb_serial(), args.json)
+
+
+def cmd_list(args):
+    ws = windows()
+    if args.json:
+        print(json.dumps(ws, indent=2))
+        return
+    for w in ws:
+        where = "hidden" if w["hidden"] else "window"
+        print(f"{w['package']}  display {w['display_id']}  {w['width']}x{w['height']} at {w['dpi']} dpi  {where}")
+
+
+def cmd_close(args):
+    checked(f"close {args.package}")
+
+
+def cmd_focus(args):
+    checked(f"focus {args.package}")
+
+
+def cmd_screenshot(args):
+    reply = checked(f"screenshot {args.package}", timeout=30)
+    path = reply.split(" ", 1)[1]
+    if not path.startswith("/data/"):
+        raise Fail(f"unexpected reply: {reply}")
+    host = os.path.join(ANDROID_DATA, path[len("/data/"):])
+    if args.output == "-":
+        with open(host, "rb") as f:
+            shutil.copyfileobj(f, sys.stdout.buffer)
+        os.unlink(host)
+        return
+    out = args.output
+    if not out:
+        os.makedirs(SHOTS, exist_ok=True)
+        out = os.path.join(SHOTS, os.path.basename(host))
+    shutil.move(host, out)
+    print(out)
+
+
+MEDIA_SOCKET = os.path.join(ANDROID_DATA, "waydroid-app-displays", "media.sock")
+MPRIS_PATH = "/org/mpris/MediaPlayer2"
+MPRIS_ROOT = "org.mpris.MediaPlayer2"
+MPRIS_PLAYER = "org.mpris.MediaPlayer2.Player"
+MPRIS_XML = """<node>
+ <interface name="org.mpris.MediaPlayer2">
+  <method name="Raise"/>
+  <method name="Quit"/>
+  <property name="CanQuit" type="b" access="read"/>
+  <property name="CanRaise" type="b" access="read"/>
+  <property name="HasTrackList" type="b" access="read"/>
+  <property name="Identity" type="s" access="read"/>
+  <property name="DesktopEntry" type="s" access="read"/>
+  <property name="SupportedUriSchemes" type="as" access="read"/>
+  <property name="SupportedMimeTypes" type="as" access="read"/>
+ </interface>
+ <interface name="org.mpris.MediaPlayer2.Player">
+  <method name="Next"/>
+  <method name="Previous"/>
+  <method name="Pause"/>
+  <method name="PlayPause"/>
+  <method name="Stop"/>
+  <method name="Play"/>
+  <method name="Seek"><arg name="Offset" type="x" direction="in"/></method>
+  <method name="SetPosition">
+   <arg name="TrackId" type="o" direction="in"/><arg name="Position" type="x" direction="in"/>
+  </method>
+  <method name="OpenUri"><arg name="Uri" type="s" direction="in"/></method>
+  <signal name="Seeked"><arg name="Position" type="x"/></signal>
+  <property name="PlaybackStatus" type="s" access="read"/>
+  <property name="Rate" type="d" access="readwrite"/>
+  <property name="Metadata" type="a{sv}" access="read"/>
+  <property name="Volume" type="d" access="readwrite"/>
+  <property name="Position" type="x" access="read"/>
+  <property name="MinimumRate" type="d" access="read"/>
+  <property name="MaximumRate" type="d" access="read"/>
+  <property name="CanGoNext" type="b" access="read"/>
+  <property name="CanGoPrevious" type="b" access="read"/>
+  <property name="CanPlay" type="b" access="read"/>
+  <property name="CanPause" type="b" access="read"/>
+  <property name="CanSeek" type="b" access="read"/>
+  <property name="CanControl" type="b" access="read"/>
+ </interface>
+</node>"""
+# android.media.session.PlaybackState.ACTION_*
+ACTION_STOP, ACTION_PAUSE, ACTION_PLAY = 1, 2, 4
+ACTION_PREVIOUS, ACTION_NEXT, ACTION_SEEK, ACTION_PLAY_PAUSE = 16, 32, 256, 512
+# A reported position this far from the extrapolated one means the app seeked.
+SEEK_THRESHOLD_US = 1_500_000
+RECONNECT_SECONDS = 3
+
+
+def media_control(session_id, action, ms=None):
+    line = f"control {session_id} {action}" + (f" {int(ms)}" if ms is not None else "")
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
+            s.settimeout(3)
+            s.connect(MEDIA_SOCKET)
+            s.sendall(line.encode() + b"\n")
+            reply = s.recv(4096).decode().strip()
+    except OSError as e:
+        reply = f"error {e}"
+    if reply != "ok":
+        print(f"mpris: {line}: {reply}", file=sys.stderr)
+
+
+def bus_name_part(text):
+    """Turns a package into bus name elements: letters, digits and _, never starting with a digit."""
+    parts = [re.sub(r"[^A-Za-z0-9_]", "_", p) or "_" for p in text.split(".")]
+    return ".".join("_" + p if p[0].isdigit() else p for p in parts)
+
+
+class MprisPlayer:
+    """One Android media session as an MPRIS player, on a D-Bus connection of its own: clients
+    tell players apart by the connection that sends their signals."""
+
+    def __init__(self, Gio, GLib, address, session, name):
+        self.Gio, self.GLib = Gio, GLib
+        self.id = session["id"]
+        self.package = session["package"]
+        self.identity = label(self.package) or self.package
+        self.track = 0
+        self.session = {}
+        self.base_us, self.base_time, self.rate = 0, time.monotonic(), 0.0
+        self.conn = Gio.DBusConnection.new_for_address_sync(
+            address, Gio.DBusConnectionFlags.AUTHENTICATION_CLIENT | Gio.DBusConnectionFlags.MESSAGE_BUS_CONNECTION,
+            None, None)
+        for iface in Gio.DBusNodeInfo.new_for_xml(MPRIS_XML).interfaces:
+            self.conn.register_object(MPRIS_PATH, iface, self.on_call, self.on_get, self.on_set)
+        self.update(session)
+        self.owner = Gio.bus_own_name_on_connection(self.conn, name, Gio.BusNameOwnerFlags.NONE, None, None)
+
+    def close(self):
+        self.Gio.bus_unown_name(self.owner)
+        self.conn.close_sync(None)
+
+    # ---- State ----
+
+    def position_us(self):
+        us = self.base_us + (time.monotonic() - self.base_time) * self.rate * 1e6
+        length = self.session.get("duration_ms", 0) * 1000
+        return int(min(us, length) if length > 0 else us)
+
+    def track_path(self):
+        return f"/org/waydroid/track/{self.id}_{self.track}"
+
+    def metadata(self):
+        V, s = self.GLib.Variant, self.session
+        m = {"mpris:trackid": V("o", self.track_path())}
+        if s.get("duration_ms", 0) > 0:
+            m["mpris:length"] = V("x", s["duration_ms"] * 1000)
+        if s.get("art"):
+            m["mpris:artUrl"] = V("s", "file://" + os.path.join(ANDROID_DATA, s["art"][len("/data/"):]))
+        elif s.get("art_url"):
+            m["mpris:artUrl"] = V("s", s["art_url"])
+        for key, field in (("xesam:title", "title"), ("xesam:album", "album")):
+            if s.get(field):
+                m[key] = V("s", s[field])
+        if s.get("artist"):
+            m["xesam:artist"] = V("as", [s["artist"]])
+        return m
+
+    def player_props(self):
+        V, actions = self.GLib.Variant, self.session.get("actions", 0)
+        status = {"playing": "Playing", "paused": "Paused"}.get(self.session.get("status"), "Stopped")
+        return {
+            "PlaybackStatus": V("s", status),
+            "Metadata": V("a{sv}", self.metadata()),
+            "CanGoNext": V("b", bool(actions & ACTION_NEXT)),
+            "CanGoPrevious": V("b", bool(actions & ACTION_PREVIOUS)),
+            "CanPlay": V("b", bool(actions & (ACTION_PLAY | ACTION_PLAY_PAUSE))),
+            "CanPause": V("b", bool(actions & (ACTION_PAUSE | ACTION_PLAY_PAUSE))),
+            "CanSeek": V("b", bool(actions & ACTION_SEEK)),
+        }
+
+    def update(self, session):
+        old = self.player_props() if self.session else {}
+        track_keys = ("title", "artist", "album", "duration_ms")
+        new_track = any(session.get(k) != self.session.get(k) for k in track_keys)
+        if new_track and self.session:
+            self.track += 1
+        expected = self.position_us()
+        self.session = session
+        self.base_us, self.base_time = session.get("position_ms", 0) * 1000, time.monotonic()
+        self.rate = session.get("speed", 0.0)
+        new = self.player_props()
+        changed = {k: v for k, v in new.items() if k not in old or not v.equal(old[k])}
+        if old and changed:
+            self.conn.emit_signal(None, MPRIS_PATH, "org.freedesktop.DBus.Properties", "PropertiesChanged",
+                                  self.GLib.Variant("(sa{sv}as)", (MPRIS_PLAYER, changed, [])))
+        if old and not new_track and abs(self.base_us - expected) > SEEK_THRESHOLD_US:
+            self.conn.emit_signal(None, MPRIS_PATH, MPRIS_PLAYER, "Seeked", self.GLib.Variant("(x)", (self.base_us,)))
+
+    # ---- D-Bus ----
+
+    def on_get(self, conn, sender, path, iface, prop):
+        V = self.GLib.Variant
+        if iface == MPRIS_ROOT:
+            return {
+                "CanQuit": V("b", False), "CanRaise": V("b", True), "HasTrackList": V("b", False),
+                "Identity": V("s", self.identity), "DesktopEntry": V("s", f"waydroid.{self.package}"),
+                "SupportedUriSchemes": V("as", []), "SupportedMimeTypes": V("as", []),
+            }.get(prop)
+        if prop == "Position":
+            return V("x", self.position_us())
+        if prop in ("Rate", "MinimumRate", "MaximumRate", "Volume"):
+            return V("d", 1.0)
+        if prop == "CanControl":
+            return V("b", True)
+        return self.player_props().get(prop)
+
+    def on_set(self, conn, sender, path, iface, prop, value):
+        return True  # Rate and Volume stay at 1
+
+    def on_call(self, conn, sender, path, iface, method, params, invocation):
+        actions = {"Play": "play", "Pause": "pause", "PlayPause": "playpause", "Stop": "stop",
+                   "Next": "next", "Previous": "previous"}
+        if method in actions:
+            media_control(self.id, actions[method])
+        elif method == "Seek":
+            media_control(self.id, "seek", max(0, self.position_us() + params[0]) / 1000)
+        elif method == "SetPosition":
+            if params[0] == self.track_path():
+                media_control(self.id, "seek", max(0, params[1]) / 1000)
+        elif method == "Raise":
+            subprocess.Popen([os.path.realpath(__file__), "launch", "--quiet", self.package],
+                             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, start_new_session=True)
+        invocation.return_value(None)
+
+
+def cmd_mpris(args):
+    import gi
+    gi.require_version("Gio", "2.0")
+    from gi.repository import Gio, GLib
+
+    address = Gio.dbus_address_get_for_bus_sync(Gio.BusType.SESSION, None)
+    players = {}
+    state = {"sock": None, "buf": b"", "watch": 0}
+
+    def sync(sessions):
+        seen = set()
+        counts = {}
+        for s in sessions:
+            counts[s["package"]] = counts.get(s["package"], 0) + 1
+        for s in sessions:
+            seen.add(s["id"])
+            if s["id"] in players:
+                players[s["id"]].update(s)
+                continue
+            name = "org.mpris.MediaPlayer2.waydroid." + bus_name_part(s["package"])
+            if counts[s["package"]] > 1:
+                name += f".instance{s['id']}"
+            try:
+                players[s["id"]] = MprisPlayer(Gio, GLib, address, s, name)
+            except GLib.Error as e:
+                print(f"mpris: can't publish {s['package']}: {e.message}", file=sys.stderr)
+        for gone in [i for i in players if i not in seen]:
+            players.pop(gone).close()
+
+    def disconnect():
+        if state["watch"]:
+            GLib.source_remove(state["watch"])
+            state["watch"] = 0
+        if state["sock"]:
+            state["sock"].close()
+            state["sock"] = None
+        sync([])
+        GLib.timeout_add_seconds(RECONNECT_SECONDS, connect)
+
+    def readable(fd, condition):
+        try:
+            data = state["sock"].recv(65536)
+        except BlockingIOError:
+            return True
+        except OSError:
+            data = b""
+        if not data:
+            state["watch"] = 0
+            disconnect()
+            return False
+        state["buf"] += data
+        *lines, state["buf"] = state["buf"].split(b"\n")
+        if lines:
+            try:
+                sync(json.loads(lines[-1]).get("sessions", []))
+            except ValueError as e:
+                print(f"mpris: bad snapshot: {e}", file=sys.stderr)
+        return True
+
+    def connect():
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            s.settimeout(3)
+            s.connect(MEDIA_SOCKET)
+            s.sendall(b"watch\n")
+        except OSError:
+            s.close()
+            return True  # Waydroid isn't running; try again later
+        s.setblocking(False)
+        state["sock"], state["buf"] = s, b""
+        state["watch"] = GLib.io_add_watch(s.fileno(), GLib.IO_IN | GLib.IO_HUP | GLib.IO_ERR, readable)
+        print("mpris: connected to the media bridge", file=sys.stderr)
+        return False
+
+    if connect():
+        GLib.timeout_add_seconds(RECONNECT_SECONDS, connect)
+    GLib.MainLoop().run()
+
+
+def main():
+    p = argparse.ArgumentParser(prog="waydroid-app-displays", description=__doc__,
+                                formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = p.add_subparsers(dest="command", required=True)
+
+    s = sub.add_parser("launch", help="open an app and print how to capture, drive and inspect it")
+    s.add_argument("package")
+    s.add_argument("--size", metavar="WxH",
+                   help="Android display size in pixels, such as 1080x2340; the window is sized to "
+                        "match, or scaled down to fit the monitor. Default: follow the window")
+    s.add_argument("--dpi", type=int, metavar="N",
+                   help="Android density, such as 440; dp width = pixels * 160 / dpi. Default: scale "
+                        "with the window, or 440 for a hidden phone-sized display")
+    s.add_argument("--hidden", action="store_true",
+                   help="no window: run the app on an off-screen display, 1080x2340 at 440 dpi unless "
+                        "--size and --dpi say otherwise")
+    s.add_argument("--json", action="store_true", help="print the display and commands as JSON")
+    s.add_argument("--quiet", action="store_true", help="print nothing; don't wait for the display")
+    s.add_argument("--stock-fallback", action="store_true", help=argparse.SUPPRESS)
+    s.set_defaults(func=cmd_launch)
+
+    s = sub.add_parser("info", help="print the commands for an open app again")
+    s.add_argument("package")
+    s.add_argument("--json", action="store_true")
+    s.set_defaults(func=cmd_info)
+
+    s = sub.add_parser("screenshot", help="save an app's display as a PNG")
+    s.add_argument("package")
+    s.add_argument("-o", "--output", metavar="FILE",
+                   help=f"PNG path, or - for stdout. Default: a new file in {SHOTS}, whose path is printed")
+    s.set_defaults(func=cmd_screenshot)
+
+    s = sub.add_parser("list", help="list open apps and their displays")
+    s.add_argument("--json", action="store_true")
+    s.set_defaults(func=cmd_list)
+
+    s = sub.add_parser("close", help="close an app's window or hidden display")
+    s.add_argument("package")
+    s.set_defaults(func=cmd_close)
+
+    s = sub.add_parser("focus", help="send keyboard input to an app's display, such as a hidden one")
+    s.add_argument("package")
+    s.set_defaults(func=cmd_focus)
+
+    s = sub.add_parser("mpris", help="publish Android's media sessions as MPRIS players; "
+                                     "waydroid-app-displays-mpris.service runs it")
+    s.set_defaults(func=cmd_mpris)
+
+    args = p.parse_args()
+    try:
+        args.func(args)
+    except Fail as e:
+        print(f"waydroid-app-displays: {e}", file=sys.stderr)
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()

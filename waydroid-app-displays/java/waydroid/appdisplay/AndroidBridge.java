@@ -8,12 +8,18 @@ import android.content.Context;
 import android.content.ContextWrapper;
 import android.content.Intent;
 import android.content.pm.ResolveInfo;
+import android.graphics.Bitmap;
+import android.graphics.PixelFormat;
+import android.graphics.Rect;
 import android.hardware.display.DisplayManager;
 import android.hardware.display.VirtualDisplay;
 import android.hardware.input.InputManager;
+import android.media.Image;
+import android.media.ImageReader;
 import android.os.Binder;
 import android.os.Bundle;
 import android.os.IBinder;
+import android.os.ParcelFileDescriptor;
 import android.os.Process;
 import android.os.SystemClock;
 import android.util.Log;
@@ -23,15 +29,23 @@ import android.view.KeyCharacterMap;
 import android.view.KeyEvent;
 import android.view.MotionEvent;
 import android.view.Surface;
+import android.view.SurfaceControl;
 
 import java.io.BufferedReader;
+import java.io.File;
+import java.io.FileOutputStream;
 import java.io.FileReader;
+import java.io.IOException;
+import java.io.OutputStream;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
+import java.nio.ByteBuffer;
+import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.Locale;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /** Android-side operations the native event loop calls into. All methods run on the loop thread. */
 final class AndroidBridge {
@@ -257,6 +271,131 @@ final class AndroidBridge {
         }
     }
 
+    // ---- Screenshots ----
+
+    private static final long CAPTURE_TIMEOUT_MS = 3000;
+    private static final AtomicInteger CAPTURES = new AtomicInteger();
+
+    /**
+     * Saves the display's content as a PNG under DIR/captures on a worker thread, then writes
+     * "ok PATH" or "error MESSAGE" to {@code replyFd} and closes it.
+     */
+    void screenshot(final String pkg, final int displayId, final int width, final int height, int replyFd) {
+        final ParcelFileDescriptor reply = ParcelFileDescriptor.adoptFd(replyFd);
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
+                String line;
+                File file = null;
+                try {
+                    file = capture(pkg, displayId, width, height);
+                    line = "ok " + file.getPath() + "\n";
+                } catch (Throwable t) {
+                    Log.e(TAG, "capturing display " + displayId + " failed", t);
+                    Throwable cause = t.getCause() != null ? t.getCause() : t;
+                    line = "error " + cause + "\n";
+                }
+                try (OutputStream out = new ParcelFileDescriptor.AutoCloseOutputStream(reply)) {
+                    out.write(line.getBytes(StandardCharsets.UTF_8));
+                } catch (IOException e) {
+                    // Nobody will collect the file.
+                    Log.w(TAG, "can't send the screenshot reply", e);
+                    if (file != null)
+                        file.delete();
+                }
+            }
+        }, "screenshot").start();
+    }
+
+    /**
+     * Mirrors the display's layer stack into a CPU-readable buffer through a SurfaceFlinger
+     * display of its own, as scrcpy does: the window's buffers are GPU memory, which the CPU
+     * can't map, and `screencap` only reaches physical displays.
+     */
+    private static File capture(String pkg, int displayId, int width, int height) throws Exception {
+        Object displayManager = service("display", "android.hardware.display.IDisplayManager");
+        Object info = method(displayManager, "getDisplayInfo", 1).invoke(displayManager, displayId);
+        if (info == null)
+            throw new IllegalStateException("display " + displayId + " is gone");
+        int layerStack = field(info, "layerStack").getInt(info);
+
+        Class<?> sc = SurfaceControl.class;
+        ImageReader reader = ImageReader.newInstance(width, height, PixelFormat.RGBA_8888, 2);
+        IBinder token;
+        try {
+            token = (IBinder) sc.getMethod("createDisplay", String.class, boolean.class)
+                    .invoke(null, TAG + "-capture", true);
+        } catch (Throwable t) {
+            reader.close();
+            throw t;
+        }
+        Bitmap bitmap;
+        try {
+            Rect rect = new Rect(0, 0, width, height);
+            sc.getMethod("openTransaction").invoke(null);
+            try {
+                sc.getMethod("setDisplaySurface", IBinder.class, Surface.class).invoke(null, token, reader.getSurface());
+                sc.getMethod("setDisplayProjection", IBinder.class, int.class, Rect.class, Rect.class)
+                        .invoke(null, token, 0, rect, rect);
+                sc.getMethod("setDisplayLayerStack", IBinder.class, int.class).invoke(null, token, layerStack);
+            } finally {
+                sc.getMethod("closeTransaction").invoke(null);
+            }
+            Image image;
+            long deadline = SystemClock.uptimeMillis() + CAPTURE_TIMEOUT_MS;
+            while ((image = reader.acquireLatestImage()) == null) {
+                if (SystemClock.uptimeMillis() > deadline)
+                    throw new IllegalStateException("no frame from display " + displayId + " within "
+                            + CAPTURE_TIMEOUT_MS + " ms");
+                SystemClock.sleep(5);
+            }
+            try {
+                bitmap = toBitmap(image);
+            } finally {
+                image.close();
+            }
+        } finally {
+            sc.getMethod("destroyDisplay", IBinder.class).invoke(null, token);
+            reader.close();
+        }
+
+        File dir = new File(Main.DIR, "captures");
+        if (!dir.isDirectory() && !dir.mkdirs())
+            throw new IOException("can't create " + dir);
+        // Screenshots of one app can run at the same time, within the same millisecond.
+        File file = new File(dir, pkg + "-" + System.currentTimeMillis() + "-" + CAPTURES.incrementAndGet() + ".png");
+        File part = new File(dir, "." + file.getName() + ".part");
+        try (FileOutputStream out = new FileOutputStream(part)) {
+            if (!bitmap.compress(Bitmap.CompressFormat.PNG, 100, out))
+                throw new IOException("PNG encoding failed");
+        } finally {
+            bitmap.recycle();
+        }
+        if (!part.renameTo(file))
+            throw new IOException("can't rename " + part + " to " + file);
+        return file;
+    }
+
+    private static Bitmap toBitmap(Image image) {
+        int width = image.getWidth(), height = image.getHeight();
+        Image.Plane plane = image.getPlanes()[0];
+        ByteBuffer src = plane.getBuffer();
+        int rowStride = plane.getRowStride(), rowBytes = width * 4;
+        ByteBuffer pixels = ByteBuffer.allocate(rowBytes * height);
+        byte[] row = new byte[rowBytes];
+        for (int y = 0; y < height; y++) {
+            src.position(y * rowStride);
+            src.get(row);
+            pixels.put(row);
+        }
+        pixels.rewind();
+        Bitmap bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888);
+        bitmap.copyPixelsFromBuffer(pixels);
+        // The composited display has no meaningful alpha.
+        bitmap.setHasAlpha(false);
+        return bitmap;
+    }
+
     // ---- Refresh rate ----
 
     // Settings writes are binder calls to the settings provider; they run off the loop thread, in order.
@@ -400,7 +539,7 @@ final class AndroidBridge {
     }
 
     /** The minimum a framework manager needs to act as the system package. */
-    private static final class SystemContext extends ContextWrapper {
+    static final class SystemContext extends ContextWrapper {
         SystemContext() {
             super(null);
         }
@@ -423,6 +562,17 @@ final class AndroidBridge {
         @Override
         public Context getApplicationContext() {
             return this;
+        }
+
+        // Hidden Context method; MediaSessionManager asks for the user.
+        public int getUserId() {
+            return 0;
+        }
+
+        // MediaSessionManager looks up services it only uses for features this service skips.
+        @Override
+        public Object getSystemService(String name) {
+            return null;
         }
     }
 }

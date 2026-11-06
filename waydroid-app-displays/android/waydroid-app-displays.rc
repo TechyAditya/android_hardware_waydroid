@@ -5,5 +5,13 @@ service waydroid_app_displays /system/bin/app_process /system/bin --nice-name=wa
     disabled
     oneshot
 
+service waydroid_app_media /system/bin/app_process /system/bin --nice-name=waydroid-app-media waydroid.appdisplay.Media
+    user system
+    group system
+    setenv CLASSPATH /data/waydroid-app-displays/appdisplay.jar
+    disabled
+    oneshot
+
 on property:sys.boot_completed=1
     start waydroid_app_displays
+    start waydroid_app_media

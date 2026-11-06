@@ -61,6 +61,11 @@ struct Window {
     uint32_t id = 0;
     std::string pkg;
     std::string title;
+    // A hidden window has no Wayland objects: its display is only seen through captures and adb.
+    bool hidden = false;
+    // Set at launch: the display keeps this size and density whatever the window's size and scale.
+    int fixed_w = 0, fixed_h = 0, fixed_dpi = 0;
+    int hint_w = 0, hint_h = 0; // the fixed window size asked of the compositor, in logical pixels
 
     wl_surface *surface = nullptr;
     xdg_surface *xsurface = nullptr;
@@ -106,7 +111,7 @@ struct Java {
     JNIEnv *env = nullptr;
     jobject bridge = nullptr;
     jmethodID createDisplay, displayId, resizeDisplay, releaseDisplay, launch, taskCount, removeTasks,
-            focusDisplay, injectMotion, injectKey, setRefreshRate;
+            focusDisplay, injectMotion, injectKey, setRefreshRate, screenshot;
     jintArray ids = nullptr;
     jfloatArray xy = nullptr;
 
