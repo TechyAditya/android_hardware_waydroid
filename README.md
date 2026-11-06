@@ -9,3 +9,4 @@ It was tested on one setup only: Hyprland on Arch Linux (CachyOS) with an NVIDIA
 - [INSTALL.md](INSTALL.md) lists the requirements and explains how to build, install, check, update, and uninstall. It also lists the branch that holds each fix.
 - [UPSTREAM.md](UPSTREAM.md) lists what this fork plans to send to Waydroid, with the draft pull requests and issues.
 - [AGENTS.md](AGENTS.md) has notes for AI coding agents that work on this branch.
+- [AGENT-PREFERENCES.md](AGENT-PREFERENCES.md) has instructions to copy into your own `AGENTS.md`, so your agent can test web pages and apps in Waydroid.

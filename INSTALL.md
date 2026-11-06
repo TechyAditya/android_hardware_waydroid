@@ -172,6 +172,8 @@ waydroid-app-displays launch org.cromite.cromite --hidden --size 720x1280 --dpi 
 
 The command prints the display id and the commands to take screenshots, record, tap, swipe, type, and close the app. Without `--hidden`, the app opens in a floating window of that size. A later `waydroid app launch` of the same app, or a start from the app launcher, shows it in a normal window again at the desktop's size and density. Run `waydroid-app-displays --help` for every command.
 
+If you use an AI coding agent, you can add the author's Waydroid testing instructions to your own `AGENTS.md`. [AGENT-PREFERENCES.md](AGENT-PREFERENCES.md) has the section to copy, with the Cromite browser it uses.
+
 Run `waydroid prop set` and `waydroid-app-displays` as the user that runs the session. With `sudo`, `waydroid prop set` looks for a session of root and changes nothing.
 
 ## Choose how 8-bit video reaches Android
