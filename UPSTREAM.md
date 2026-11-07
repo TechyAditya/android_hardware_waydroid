@@ -10,6 +10,7 @@ What this fork plans to send to Waydroid, in plain words. Open so far: [#92](htt
 6. **Video buffers in GPU memory go straight to the compositor.** On hold: upstream has nothing that creates those buffers yet. [Note](#6-gpu-memory-buffers-as-dma-bufs)
 7. **Bug report to NVIDIA.** Their driver misreads some video buffers, which shows as green or colourless frames. Posted as [forum thread 387942](https://forums.developer.nvidia.com/t/vulkan-some-nv12-dma-bufs-imported-as-two-plane-images-read-back-wrong-615-78-08/387942), with a small program that shows the bug. [Draft](#7-nvidia-misreads-two-plane-nv12-imports)
 8. **Android media players in the desktop's media controls.** Apple Music, YouTube and other players show in the desktop's media widget with their title, cover and position, and take play, pause, skip and seek. Requested in [waydroid#868](https://github.com/waydroid/waydroid/issues/868) since 2023. Two PRs, one in `android_frameworks_waydroid` and one in `waydroid/waydroid`, built the way Waydroid already forwards notifications. [Asked the maintainer on #868](https://github.com/waydroid/waydroid/issues/868#issuecomment-6686462350) how he wants the PRs; not written yet. The fork's working version runs as a separate helper, which upstream would not take as it is. [Plan](#8-media-controls-over-mpris)
+9. **Desktop title bars on app windows.** On KDE, each app window gets KWin's own title bar, with minimize, maximize and close. Requested in [waydroid#1119](https://github.com/waydroid/waydroid/issues/1119), where the maintainer said it needs one Android display per app. The fork's `waydroid-app-displays` has that, so it is a comment on the issue, not a PR. Not posted. [Draft](#9-desktop-title-bars)
 
 Every head branch below starts from upstream `lineage-20` and is on `TechyAditya/android_hardware_waydroid` unless it says otherwise. Each one compiles alone with `stack/build.sh`. The changes ran together in the `all-fixes` build, not branch by branch. To open a pull request from a draft, save the body to a file and run:
 
@@ -399,4 +400,22 @@ Testing: the host service can run against the fork's helper speaking the same bi
 I have this working on Waydroid 1.6.3 with the LineageOS 20 images, as a separate helper for now: https://github.com/TechyAditya/waydroid-app-displays (`Media.java`, `MediaSessions.java` and the `mpris` command). Apple Music and YouTube show in the desktop's media controls with title, cover and position, and play, pause, skip and seek work. Tested on Hyprland with Noctalia's media widget.
 
 I'd like to send it upstream in the shape of the notification forwarding: a media session listener in `WayDroidService` (android_frameworks_waydroid, like 5c6283d) and a `media_manager` service that publishes MPRIS players (waydroid, like 21da80c). @aleasto, would you take pull requests to android_frameworks_waydroid for this, or would you rather review a patch another way?
+```
+
+## 9. Desktop title bars
+
+[waydroid#1119](https://github.com/waydroid/waydroid/issues/1119) asks for title bars drawn by the compositor through `xdg-decoration-unstable-v1`. In 2023 the maintainer answered that multi-window windows are transparent full-screen surfaces that move only inside Android, so the compositor cannot frame them. He said the proper fix is one Android display per app, and that the compositor's title bar would lose Android's Back button. In these windows the mouse's back button sends BACK. Esc does not, because the helper injects keys as Android's virtual keyboard, whose key map gives Esc no BACK fallback. The last comment, from 2024, asks whether anyone is working on displays per app.
+
+`waydroid-app-displays` runs each app on its own virtual display in its own window, and since commit `0899f94` each window asks for a server-side title bar. GNOME does not offer the protocol, so its windows stay without one.
+
+### Comment on #1119 (not posted)
+
+```markdown
+@ethanc8 I have one Android display per app working, outside Waydroid for now: https://github.com/TechyAditya/waydroid-app-displays. Each app runs on its own virtual display, shown in its own Wayland window, and the display resizes with the window. Because the window is the whole display, the compositor can frame it: each window asks for a server-side title bar through `xdg-decoration-unstable-v1` ([commit](https://github.com/TechyAditya/waydroid-app-displays/commit/0899f94)). On KDE Plasma 6.8, KWin draws its normal title bar with minimize, maximize and close, and maximizing resizes Android's display to fill the screen.
+
+Back still works without Android's caption: the mouse's back button sends BACK.
+
+GNOME does not offer `xdg-decoration`, so there the windows have no title bar yet. libdecor would cover it.
+
+Tested on KDE Plasma 6.8.2 and Hyprland 0.57, on CachyOS with Waydroid 1.6.3 and the LineageOS 20 images. It runs as a separate `app_process` helper, so it is not in a shape to merge as it is.
 ```
