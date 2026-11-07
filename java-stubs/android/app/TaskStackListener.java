@@ -5,4 +5,6 @@ public abstract class TaskStackListener {
     public TaskStackListener() {}
 
     public void onTaskStackChanged() throws android.os.RemoteException {}
+
+    public void onTaskMovedToBack(ActivityManager.RunningTaskInfo ti) throws android.os.RemoteException {}
 }
