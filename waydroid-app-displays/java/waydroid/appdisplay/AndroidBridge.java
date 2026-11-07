@@ -1,5 +1,6 @@
 package waydroid.appdisplay;
 
+import android.app.ActivityManager;
 import android.app.ActivityOptions;
 import android.app.TaskStackListener;
 import android.content.AttributionSource;
@@ -43,6 +44,8 @@ import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.Locale;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -109,6 +112,10 @@ final class AndroidBridge {
 
     // ---- Displays ----
 
+    // Ids of the displays this service made. The task listener runs on a binder thread, so this is
+    // read there while the loop thread changes it.
+    private final Set<Integer> ownDisplays = ConcurrentHashMap.newKeySet();
+
     VirtualDisplay createDisplay(String name, int width, int height, int dpi, Surface surface) {
         VirtualDisplay display;
         try {
@@ -117,6 +124,7 @@ final class AndroidBridge {
             Log.e(TAG, "createVirtualDisplay failed", t);
             return null;
         }
+        ownDisplays.add(displayId(display));
         // Apps that lock their orientation would otherwise be letterboxed whenever the window's
         // shape doesn't match, as on a phone held the other way.
         try {
@@ -164,6 +172,7 @@ final class AndroidBridge {
 
     void releaseDisplay(VirtualDisplay display) {
         try {
+            ownDisplays.remove(displayId(display));
             display.release();
         } catch (Throwable t) {
             Log.e(TAG, "releasing a display failed", t);
@@ -221,12 +230,16 @@ final class AndroidBridge {
         return (int[]) field(rootTask, "childTaskIds").get(rootTask);
     }
 
-    /** Number of tasks on the display, or -1 if Android can't say. */
+    /**
+     * Number of tasks on the display, or -1 if Android can't say. A task whose last activity has
+     * finished lingers in the list for a while with no activities, so roots without any are skipped.
+     */
     int taskCount(int displayId) {
         try {
             int count = 0;
             for (Object root : rootTasks(displayId))
-                count += childTaskIds(root).length;
+                if (field(root, "numActivities").getInt(root) > 0)
+                    count += childTaskIds(root).length;
             return count;
         } catch (Throwable t) {
             Log.e(TAG, "listing tasks on display " + displayId + " failed", t);
@@ -243,6 +256,15 @@ final class AndroidBridge {
                     remove.invoke(taskManager, id);
         } catch (Throwable t) {
             Log.e(TAG, "removing tasks on display " + displayId + " failed", t);
+        }
+    }
+
+    /** Finishes one task, so the display shows the next one below it. */
+    void removeTask(int taskId) {
+        try {
+            method(taskManager, "removeTask", 1).invoke(taskManager, taskId);
+        } catch (Throwable t) {
+            Log.e(TAG, "removing task " + taskId + " failed", t);
         }
     }
 
@@ -264,6 +286,21 @@ final class AndroidBridge {
             @Override
             public void onTaskStackChanged() {
                 Native.post(Native.MSG_TASKS_CHANGED, 0);
+            }
+
+            // Back on a launcher activity's root moves its task to the back instead of finishing it.
+            // On a window's display nothing would then show, so the task is finished.
+            @Override
+            public void onTaskMovedToBack(ActivityManager.RunningTaskInfo info) {
+                try {
+                    int displayId = field(info, "displayId").getInt(info);
+                    if (!ownDisplays.contains(displayId))
+                        return;
+                    removeTask(field(info, "taskId").getInt(info));
+                    Native.post(Native.MSG_TASKS_CHANGED, 0);
+                } catch (Throwable t) {
+                    Log.e(TAG, "removing a task moved to back failed", t);
+                }
             }
         };
         try {
