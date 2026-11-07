@@ -54,6 +54,7 @@ struct {
     wp_cursor_shape_device_v1 *shape_device = nullptr;
 
     uint32_t pointer_window = 0;
+    bool on_decor = false; // the pointer is on a title bar or resize edge
     double px = 0, py = 0;
     int buttons = 0;
     bool pressed = false; // between ACTION_DOWN and ACTION_UP
@@ -137,10 +138,11 @@ void pointer_enter(void *, wl_pointer *pointer, uint32_t serial, wl_surface *sur
         s.shape_device = wp_cursor_shape_manager_v1_get_pointer(s.shapes, pointer);
     if (s.shape_device)
         wp_cursor_shape_device_v1_set_shape(s.shape_device, serial, WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_DEFAULT);
-    Window *w = window_for_surface(surface);
-    s.pointer_window = w ? w->id : 0;
     s.px = wl_fixed_to_double(x);
     s.py = wl_fixed_to_double(y);
+    s.on_decor = decor_pointer_enter(surface, serial, s.px, s.py);
+    Window *w = s.on_decor ? nullptr : window_for_surface(surface);
+    s.pointer_window = w ? w->id : 0;
     s.buttons = 0;
     s.pressed = false;
     s.moved = false;
@@ -163,19 +165,32 @@ void drop_pointer(bool hover_exit) {
 }
 
 void pointer_leave(void *, wl_pointer *, uint32_t, wl_surface *) {
+    if (s.on_decor) {
+        s.on_decor = false;
+        decor_pointer_leave();
+        return;
+    }
     drop_pointer(true);
 }
 
 void pointer_motion(void *, wl_pointer *, uint32_t, wl_fixed_t x, wl_fixed_t y) {
     s.px = wl_fixed_to_double(x);
     s.py = wl_fixed_to_double(y);
+    if (s.on_decor) {
+        decor_pointer_motion(s.px, s.py);
+        return;
+    }
     s.moved = true;
     if (wl_pointer_get_version(s.pointer) < WL_POINTER_FRAME_SINCE_VERSION)
         if (Window *w = live(s.pointer_window))
             flush_motion(w);
 }
 
-void pointer_button(void *, wl_pointer *, uint32_t, uint32_t, uint32_t button, uint32_t state) {
+void pointer_button(void *, wl_pointer *, uint32_t serial, uint32_t, uint32_t button, uint32_t state) {
+    if (s.on_decor) {
+        decor_pointer_button(serial, button, state == WL_POINTER_BUTTON_STATE_PRESSED);
+        return;
+    }
     Window *w = live(s.pointer_window);
     if (!w)
         return;
@@ -303,6 +318,8 @@ void keyboard_keymap(void *, wl_keyboard *, uint32_t, int32_t fd, uint32_t) {
 
 void keyboard_enter(void *, wl_keyboard *, uint32_t, wl_surface *surface, wl_array *) {
     Window *w = window_for_surface(surface);
+    if (!w)
+        w = decor_window_for_surface(surface);
     s.key_window = w ? w->id : 0;
     s.keys_down.clear();
     s.repeat_key = 0;
@@ -395,7 +412,10 @@ int touch_index(int32_t wl_id) {
     return -1;
 }
 
-void touch_down(void *, wl_touch *, uint32_t, uint32_t, wl_surface *surface, int32_t id, wl_fixed_t x, wl_fixed_t y) {
+void touch_down(void *, wl_touch *, uint32_t serial, uint32_t, wl_surface *surface, int32_t id, wl_fixed_t x,
+        wl_fixed_t y) {
+    if (decor_touch_down(surface, serial, id, wl_fixed_to_double(x), wl_fixed_to_double(y)))
+        return;
     Window *w = window_for_surface(surface);
     if (!w)
         return;
@@ -417,6 +437,8 @@ void touch_down(void *, wl_touch *, uint32_t, uint32_t, wl_surface *surface, int
 }
 
 void touch_up(void *, wl_touch *, uint32_t, uint32_t, int32_t id) {
+    if (decor_touch_up(id))
+        return;
     int index = touch_index(id);
     if (index < 0)
         return;
@@ -518,6 +540,23 @@ void input_reset() {
 
 void input_set_cursor_shape_manager(wp_cursor_shape_manager_v1 *manager) {
     s.shapes = manager;
+}
+
+wl_seat *input_seat() {
+    return s.seat;
+}
+
+void input_set_cursor_shape(uint32_t serial, uint32_t shape) {
+    if (s.shape_device)
+        wp_cursor_shape_device_v1_set_shape(s.shape_device, serial, shape);
+}
+
+void input_send_back(const Window *w) {
+    if (w->display_id < 0)
+        return;
+    int64_t now = now_ms();
+    inject_key(w, KEY_ACTION_DOWN, KEY_BACK, 0, now);
+    inject_key(w, KEY_ACTION_UP, KEY_BACK, 0, now);
 }
 
 void input_forget_window(const Window *w) {
