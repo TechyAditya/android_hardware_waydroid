@@ -88,6 +88,70 @@ def checked(line, timeout=5):
     return reply
 
 
+def run_out(cmd):
+    try:
+        out = subprocess.run(cmd, capture_output=True, text=True, timeout=2)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    return out.stdout.strip() if out.returncode == 0 else None
+
+
+# KWin's title bar button letters, for the ones the service's own title bar has
+KDE_BUTTONS = {"I": "minimize", "A": "maximize", "X": "close"}
+
+
+def kde_appearance():
+    def read(file, group, key, default):
+        for tool in ("kreadconfig6", "kreadconfig5"):
+            value = run_out([tool, "--file", file, "--group", group, "--key", key, "--default", default])
+            if value is not None:
+                return value
+        return None
+    left = read("kwinrc", "org.kde.kdecoration2", "ButtonsOnLeft", "MS")
+    right = read("kwinrc", "org.kde.kdecoration2", "ButtonsOnRight", "HIAX")
+    if left is None or right is None:
+        return None
+    # The title bar colour of the colour scheme; Breeze's light one when the scheme sets none
+    colour = read("kdeglobals", "WM", "activeBackground", "") or read("kdeglobals", "Colors:Window", "BackgroundNormal", "")
+    try:
+        r, g, b = (int(c) for c in colour.split(",")[:3])
+        dark = 0.299 * r + 0.587 * g + 0.114 * b < 128
+    except (AttributeError, ValueError):
+        dark = False
+    side = lambda letters: ",".join(KDE_BUTTONS[c] for c in letters if c in KDE_BUTTONS)
+    return dark, f"{side(left)}:{side(right)}"
+
+
+def gnome_appearance():
+    def gsetting(schema, key):
+        out = run_out(["gsettings", "get", schema, key])
+        return out.strip("'") if out is not None else None
+    scheme = gsetting("org.gnome.desktop.interface", "color-scheme")
+    layout = gsetting("org.gnome.desktop.wm.preferences", "button-layout")
+    if scheme is None or not layout:
+        return None
+    return scheme == "prefer-dark", layout
+
+
+def appearance():
+    """The `appearance` command for the desktop's colour scheme and window buttons, or None.
+
+    Windows draw their own title bars where the compositor draws none, as on GNOME, or anywhere
+    with persist.waydroid.app_titlebar set to `always`."""
+    desktop = os.environ.get("XDG_CURRENT_DESKTOP", "").split(":")
+    look = kde_appearance() if "KDE" in desktop else gnome_appearance()
+    if look is None or " " in look[1]:
+        return None
+    return f"appearance {'dark' if look[0] else 'light'} {look[1]}"
+
+
+def launch_request(line, look):
+    # A service older than version 4 answers `appearance` with an error, which changes nothing.
+    if look:
+        request(look)
+    return request(line)
+
+
 def waydroid_status():
     return subprocess.run([WAYDROID, "status"], capture_output=True, text=True).stdout
 
@@ -302,8 +366,9 @@ def cmd_launch(args):
     # From version 3 a `--` ends the options, so a title shaped like an option stays a title.
     title_args = (["--", title] if version >= 3 else [title]) if title else []
     line = " ".join(["launch", pkg, *opts, *title_args])
+    look = appearance()
     try:
-        reply = request(line)
+        reply = launch_request(line, look)
     except OSError:
         if session_running():
             if fallback:
@@ -315,7 +380,7 @@ def cmd_launch(args):
         while True:
             time.sleep(0.5)
             try:
-                reply = request(line)
+                reply = launch_request(line, look)
                 break
             except OSError:
                 if time.monotonic() > deadline:

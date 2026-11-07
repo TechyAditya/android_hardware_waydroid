@@ -16,6 +16,7 @@
 #include <sys/mman.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/system_properties.h>
 #include <sys/un.h>
 #include <time.h>
 #include <unistd.h>
@@ -49,8 +50,8 @@ void post(const Msg &msg) {
 namespace {
 
 // The control commands' version, which `version` reports; 2 added launch options and
-// screenshots, 3 the `--` before a launch's title.
-constexpr int kProtocolVersion = 3;
+// screenshots, 3 the `--` before a launch's title, 4 `appearance`.
+constexpr int kProtocolVersion = 4;
 constexpr int kImages = 4;
 constexpr int kDefaultWidth = 1280, kDefaultHeight = 800;
 // A hidden display launched without a size is a phone, about 393 dp wide.
@@ -101,6 +102,7 @@ struct {
     zwp_linux_dmabuf_v1 *dmabuf = nullptr;
     zxdg_output_manager_v1 *xdg_outputs = nullptr;
     zxdg_decoration_manager_v1 *decorations = nullptr;
+    wl_subcompositor *subcompositor = nullptr;
     bool shm_xbgr = false;
     wl_buffer *placeholder = nullptr;
 
@@ -442,8 +444,9 @@ void update_size_hints(Window *w) {
     }
     w->hint_w = std::max(1, int(std::lround(lw)));
     w->hint_h = std::max(1, int(std::lround(lh)));
-    xdg_toplevel_set_min_size(w->toplevel, w->hint_w, w->hint_h);
-    xdg_toplevel_set_max_size(w->toplevel, w->hint_w, w->hint_h);
+    int title = decor_title_height(w);
+    xdg_toplevel_set_min_size(w->toplevel, w->hint_w, w->hint_h + title);
+    xdg_toplevel_set_max_size(w->toplevel, w->hint_w, w->hint_h + title);
 }
 
 void start_display(Window *w) {
@@ -570,8 +573,11 @@ void fractional_preferred_scale(void *data, wp_fractional_scale_v1 *, uint32_t s
         g.base_scale120 = int(scale);
     g.last_scale120 = int(scale);
     w->scale120 = int(scale);
-    if (w->fixed_w) {
-        update_size_hints(w);
+    if (w->fixed_w || w->configured) {
+        if (w->fixed_w)
+            update_size_hints(w);
+        if (w->configured)
+            decor_update(w, w->scale120);
         wl_surface_commit(w->surface);
     }
     if (w->start_pending) {
@@ -583,12 +589,13 @@ void fractional_preferred_scale(void *data, wp_fractional_scale_v1 *, uint32_t s
 }
 const wp_fractional_scale_v1_listener fractional_listener = {fractional_preferred_scale};
 
-void toplevel_configure(void *data, xdg_toplevel *, int32_t width, int32_t height, wl_array *) {
+void toplevel_configure(void *data, xdg_toplevel *, int32_t width, int32_t height, wl_array *states) {
     Window *w = window_by_id(uint32_t(uintptr_t(data)));
     if (!w)
         return;
     w->pending_w = width;
     w->pending_h = height;
+    decor_states(w, states);
 }
 
 void toplevel_close(void *data, xdg_toplevel *) {
@@ -601,6 +608,12 @@ void toplevel_wm_capabilities(void *, xdg_toplevel *, wl_array *) {}
 const xdg_toplevel_listener toplevel_listener = {
         toplevel_configure, toplevel_close, toplevel_configure_bounds, toplevel_wm_capabilities};
 
+void decoration_configure(void *data, zxdg_toplevel_decoration_v1 *, uint32_t mode) {
+    if (Window *w = window_by_id(uint32_t(uintptr_t(data))))
+        decor_set_client_side(w, mode == ZXDG_TOPLEVEL_DECORATION_V1_MODE_CLIENT_SIDE);
+}
+const zxdg_toplevel_decoration_v1_listener decoration_listener = {decoration_configure};
+
 void xsurface_configure(void *data, xdg_surface *xs, uint32_t serial) {
     xdg_surface_ack_configure(xs, serial);
     Window *w = window_by_id(uint32_t(uintptr_t(data)));
@@ -608,8 +621,9 @@ void xsurface_configure(void *data, xdg_surface *xs, uint32_t serial) {
         return;
     int fallback_w = w->hint_w ? w->hint_w : (w->width > 0 ? w->width : kDefaultWidth);
     int fallback_h = w->hint_h ? w->hint_h : (w->height > 0 ? w->height : kDefaultHeight);
+    // The compositor sizes the whole window, including a title bar of the window's own.
     int width = w->pending_w > 0 ? w->pending_w : fallback_w;
-    int height = w->pending_h > 0 ? w->pending_h : fallback_h;
+    int height = w->pending_h > 0 ? std::max(1, w->pending_h - decor_title_height(w)) : fallback_h;
     bool first = !w->configured;
     w->configured = true;
     w->width = width;
@@ -618,6 +632,7 @@ void xsurface_configure(void *data, xdg_surface *xs, uint32_t serial) {
     if (!w->has_frame)
         wl_surface_attach(w->surface, g.placeholder, 0, 0);
     set_destination(w);
+    decor_update(w, scale_of(w));
     wl_surface_commit(w->surface);
 
     if (first && g.fractional && !w->scale120) {
@@ -763,6 +778,14 @@ void set_options(Window *w, const LaunchOptions &o) {
     }
 }
 
+// persist.waydroid.app_titlebar: `always` gives every window the service's own title bar, with
+// Back, even where the compositor would draw one; `auto`, the default, only where it draws none.
+bool own_titlebar_always() {
+    char value[PROP_VALUE_MAX] = "";
+    __system_property_get("persist.waydroid.app_titlebar", value);
+    return !strcmp(value, "always");
+}
+
 // Gives a window its Wayland surface. A hidden window being shown keeps its display, which
 // start_display() then resizes to the window.
 void create_surface(Window *w) {
@@ -782,11 +805,16 @@ void create_surface(Window *w) {
     xdg_toplevel_set_app_id(w->toplevel, ("waydroid." + w->pkg).c_str());
     xdg_toplevel_set_title(w->toplevel, w->title.c_str());
     // Without this, KWin expects the window to draw its own title bar. Asked before the first
-    // commit, as the protocol requires.
+    // commit, as the protocol requires. A compositor without the protocol, such as GNOME's, gets
+    // the window's own title bar.
+    bool own = own_titlebar_always();
     if (g.decorations) {
         w->decoration = zxdg_decoration_manager_v1_get_toplevel_decoration(g.decorations, w->toplevel);
-        zxdg_toplevel_decoration_v1_set_mode(w->decoration, ZXDG_TOPLEVEL_DECORATION_V1_MODE_SERVER_SIDE);
+        zxdg_toplevel_decoration_v1_add_listener(w->decoration, &decoration_listener, tag);
+        zxdg_toplevel_decoration_v1_set_mode(w->decoration, own ? ZXDG_TOPLEVEL_DECORATION_V1_MODE_CLIENT_SIDE
+                                                                : ZXDG_TOPLEVEL_DECORATION_V1_MODE_SERVER_SIDE);
     }
+    decor_create(w, own || !g.decorations);
     update_size_hints(w);
     wl_surface_commit(w->surface);
 }
@@ -820,6 +848,12 @@ void relaunch_with(Window *w, const std::string &title, const LaunchOptions &opt
     }
     set_options(w, opts);
     if (w->surface) {
+        if (!title.empty() && title != w->title) {
+            w->title = title;
+            xdg_toplevel_set_title(w->toplevel, w->title.c_str());
+            if (w->configured)
+                decor_update(w, scale_of(w));
+        }
         update_size_hints(w);
         wl_surface_commit(w->surface);
     }
@@ -849,6 +883,7 @@ void destroy_window(Window *w) {
     w->readers.clear();
     if (w->fractional)
         wp_fractional_scale_v1_destroy(w->fractional);
+    decor_destroy(w);
     if (w->surface) {
         wp_viewport_destroy(w->viewport);
         if (w->decoration)
@@ -987,6 +1022,17 @@ std::string handle_command(const std::string &line, int fd) {
     }
     if (cmd == "version") // a service without this command takes launch options as the title
         return "ok " + std::to_string(kProtocolVersion) + "\n";
+    if (cmd == "appearance") { // `appearance dark|light LAYOUT`: the host desktop's look, for title bars
+        if (pkg != "dark" && pkg != "light")
+            return "error appearance takes dark or light, then a button layout\n";
+        decor_set_appearance(pkg == "dark", rest);
+        for (auto &[id, w] : g.windows)
+            if (w->surface && w->configured) {
+                decor_update(w.get(), scale_of(w.get()));
+                wl_surface_commit(w->surface);
+            }
+        return "ok\n";
+    }
     if (cmd == "focus") {
         Window *w = window_for_pkg(pkg);
         if (!w || w->display_id < 0)
@@ -1129,6 +1175,8 @@ void registry_global(void *, wl_registry *registry, uint32_t name, const char *i
             watch_logical_size(o);
     } else if (!strcmp(iface, zxdg_decoration_manager_v1_interface.name)) {
         g.decorations = static_cast<zxdg_decoration_manager_v1 *>(bind(&zxdg_decoration_manager_v1_interface, 1));
+    } else if (!strcmp(iface, wl_subcompositor_interface.name)) {
+        g.subcompositor = static_cast<wl_subcompositor *>(bind(&wl_subcompositor_interface, 1));
     }
 }
 void registry_remove(void *, wl_registry *, uint32_t name) {
@@ -1301,6 +1349,7 @@ void disconnect(const char *control_path) {
         g.control = -1;
     }
     input_reset();
+    decor_init(nullptr, nullptr, nullptr, nullptr);
     if (g.placeholder)
         wl_buffer_destroy(g.placeholder);
     // Globals and seat devices are never destroyed one by one; they are unused from here on.
@@ -1315,6 +1364,7 @@ void disconnect(const char *control_path) {
     g.dmabuf = nullptr;
     g.xdg_outputs = nullptr;
     g.decorations = nullptr;
+    g.subcompositor = nullptr;
     g.placeholder = nullptr;
     g.shm_xbgr = false;
     g.outputs.clear();
@@ -1353,6 +1403,7 @@ int run(const char *runtime_dir, const char *wayland_display, const char *contro
         ALOGE("compositor lacks wl_compositor, wl_shm, xdg_wm_base or wp_viewporter");
     } else {
         g.placeholder = make_placeholder();
+        decor_init(g.compositor, g.subcompositor, g.shm, g.viewporter);
         refresh_changed();
         status = loop(control_path);
     }

@@ -32,6 +32,9 @@ fetch wayland-1.26.0.tar.xz https://gitlab.freedesktop.org/wayland/wayland/-/rel
     64176eaa46e4969903e286f8e5ef8331affc17fdf03ac9b58381d2b23162b7a3
 fetch libffi-3.4.6.tar.gz https://github.com/libffi/libffi/releases/download/v3.4.6/libffi-3.4.6.tar.gz \
     b0dea9df23c863a7a50e825440f3ebffabd65df1497108e5d437747843895a4e
+# Renders window titles in title bars the windows draw themselves
+fetch stb_truetype.h https://raw.githubusercontent.com/nothings/stb/6e9f34d5429cf16790ec43c9bac3f1ee4ad1f760/stb_truetype.h \
+    ecd30b05e0dd4fea3a13c26810dd9e1992dc379049482c393d5a19e6b5090aab
 
 ANDROID_JAR=$TOOLS/android-13/android.jar
 [[ -f $ANDROID_JAR ]] || unzip -q -o "$TOOLS/platform-33.zip" 'android-13/android.jar' -d "$TOOLS"
@@ -100,7 +103,8 @@ EOF
 fi
 
 # ---- Protocol extensions ----
-mkdir -p "$B/obj/proto"
+mkdir -p "$B/obj/proto" "$GEN"
+cp "$TOOLS/stb_truetype.h" "$GEN/"
 declare -A XML=(
     [xdg-shell]=$PROTOCOLS/stable/xdg-shell/xdg-shell.xml
     [viewporter]=$PROTOCOLS/stable/viewporter/viewporter.xml
