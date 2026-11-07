@@ -19,7 +19,8 @@ The composer changes are per-monitor refresh rates up to the display's own rate,
 
 ```sh
 sudo pacman -S --needed base-devel git curl clang lld llvm meson ninja python-mako python-yaml \
-	python-packaging libepoxy libdrm mesa ffmpeg vulkan-headers vulkan-icd-loader shaderc expat alsa-lib
+	python-packaging libepoxy libdrm mesa ffmpeg vulkan-headers vulkan-icd-loader shaderc expat alsa-lib \
+	jre-openjdk-headless
 ```
 
 The first build downloads about 1.5 GB of sources and toolchains into the ignored `build/` folders of each part, and uses about 5.5 GB of disk. On an 8-core laptop it takes about 6 minutes, most of it downloading.
@@ -60,6 +61,8 @@ The first build downloads about 1.5 GB of sources and toolchains into the ignore
    ```
 
    On the `20260927` x86_64 system image, this also installs a SurfaceFlinger with a null check for the resize crash in [waydroid/waydroid#2464](https://github.com/waydroid/waydroid/issues/2464). The patch changes 5 bytes and fits only that image, so on other images the script skips it and says so.
+
+   On the same image, it also installs a `services.jar` in which Back can leave an app's first screen in a per-app window. Waydroid's framework ignores Back on a task's first screen unless its full window is active. The patched jar keeps that rule on Android's main display only. The script builds the jar from your `system.img` with smali, which it downloads into `stack/build/tools`, and checks the result against a fixed hash. Android then runs `services.jar` without its precompiled code, so it starts a little slower.
 
 2. Install the Venus services, gralloc, and the video decoders. This also sets the `ro.hardware.egl`, `ro.hardware.vulkan`, and codec properties in `waydroid.cfg`:
 
@@ -283,11 +286,12 @@ Each fix also has its own branch on `TechyAditya/android_hardware_waydroid`, for
 | Audio HAL sample rate and float output | `audio-rate-buffer` |
 | Single-window fixes, HDR, GPU-memory buffers, and refresh rates together | `single-window-focus` |
 
-Four parts live in other repositories:
+Five parts live in other repositories:
 
 | Fix | Repository and branch |
 | --- | --- |
 | HDR passthrough in the HWC2-on-HWC1 adapter | `TechyAditya/android_vendor_waydroid` `hdr` |
 | SurfaceFlinger null check for the resize crash ([waydroid/waydroid#2464](https://github.com/waydroid/waydroid/issues/2464)) | `TechyAditya/android_vendor_waydroid` `sf-default-display` |
+| Back on a task's first screen on displays other than the default one | `TechyAditya/android_vendor_waydroid` `back-other-displays` |
 | Venus, the allocator, and the video decoder | `TechyAditya/waydroid-venus` `master` |
 | Per-app windows, the `waydroid-app-displays` command, and the media controls | `TechyAditya/waydroid-app-displays` `master` |

@@ -11,6 +11,7 @@ What this fork plans to send to Waydroid, in plain words. Open so far: [#92](htt
 7. **Bug report to NVIDIA.** Their driver misreads some video buffers, which shows as green or colourless frames. Posted as [forum thread 387942](https://forums.developer.nvidia.com/t/vulkan-some-nv12-dma-bufs-imported-as-two-plane-images-read-back-wrong-615-78-08/387942), with a small program that shows the bug. [Draft](#7-nvidia-misreads-two-plane-nv12-imports)
 8. **Android media players in the desktop's media controls.** Apple Music, YouTube and other players show in the desktop's media widget with their title, cover and position, and take play, pause, skip and seek. Requested in [waydroid#868](https://github.com/waydroid/waydroid/issues/868) since 2023. Two PRs, one in `android_frameworks_waydroid` and one in `waydroid/waydroid`, built the way Waydroid already forwards notifications. [Asked the maintainer on #868](https://github.com/waydroid/waydroid/issues/868#issuecomment-6686462350) how he wants the PRs; not written yet. The fork's working version runs as a separate helper, which upstream would not take as it is. [Plan](#8-media-controls-over-mpris)
 9. **Desktop title bars on app windows.** On KDE, each app window gets KWin's own title bar, with minimize, maximize and close. Requested in [waydroid#1119](https://github.com/waydroid/waydroid/issues/1119), where the maintainer said it needs one Android display per app. The fork's `waydroid-app-displays` has that, so it is a comment on the issue, not a PR. Not posted. [Draft](#9-desktop-title-bars)
+10. **Back leaves an app's first screen on other displays.** Waydroid's patch 0032 ignores Back on a task's first screen unless the full UI is active, so an app on its own display could never leave its first screen. A new vendor patch keeps that rule on the default display only. Not opened. [Draft](#10-back-on-other-displays)
 
 Every head branch below starts from upstream `lineage-20` and is on `TechyAditya/android_hardware_waydroid` unless it says otherwise. Each one compiles alone with `stack/build.sh`. The changes ran together in the `all-fixes` build, not branch by branch. To open a pull request from a draft, save the body to a file and run:
 
@@ -418,4 +419,26 @@ Back still works without Android's caption: the mouse's back button and Esc both
 GNOME does not offer `xdg-decoration`, so there the windows have no title bar yet. libdecor would cover it.
 
 Tested on KDE Plasma 6.8.2 and Hyprland 0.57, on CachyOS with Waydroid 1.6.3 and the LineageOS 20 images. It runs as a separate `app_process` helper, so it is not in a shape to merge as it is.
+```
+
+## 10. Back on other displays
+
+`waydroid/android_vendor_waydroid`, head `TechyAditya:back-other-displays`. The branch adds `waydroid-patches/base-patches-33/frameworks/base/0034-wm-Allow-finishing-a-task-by-the-back-button-on-othe.patch`. It applies after 0032 to LineageOS `android_frameworks_base` `lineage-20.0`. It has not been built in an AOSP tree. `stack/services.sh` installs the same check, as five instructions added to `services.jar` of the `20260927` image.
+
+Title: `base-patches-33: Allow Back to finish a task on other displays`
+
+```markdown
+## Problem
+
+0032 ("wm: Do not allow finishing a task by the back button except in full-ui mode") makes `ActivityClientController.onBackPressed()` return when the activity is its task's root and `waydroid.active_apps` is not `Waydroid`. In multi-window mode that keeps an app window from disappearing, because every app window is a task on the default display. The check does not look at the display, though, so it also applies to tasks on any other display. There, Back on a task's root activity does nothing at all: it neither finishes the activity nor moves a launcher activity's task to the back, as AOSP does.
+
+I hit this with apps on their own virtual displays, each shown in its own Wayland window ([waydroid-app-displays](https://github.com/TechyAditya/waydroid-app-displays)). Settings' first screen, Clock's main screen, and Settings > Storage > Free up space (a separate task) all ignored Back.
+
+## Change
+
+`0034-wm-Allow-finishing-a-task-by-the-back-button-on-othe.patch` applies the 0032 check only when the activity is on `DEFAULT_DISPLAY`. On the default display nothing changes, in multi-window mode or in the full UI.
+
+## Testing
+
+The patch applies after 0032 to LineageOS `android_frameworks_base` `lineage-20.0`. I have not built it in an AOSP tree. I ran the same check as a smali change to `ActivityClientController.onBackPressed()` in the `20260927` x86_64 `services.jar`, on Waydroid 1.6.3 with KDE Plasma 6.8. With apps on their own virtual displays, Back on Clock's and Settings' first screens logged `moveTaskToBack`, and Back on Free up space finished it and showed Settings again. Without it, none of the three did anything.
 ```

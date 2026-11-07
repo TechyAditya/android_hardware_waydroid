@@ -29,6 +29,7 @@ while IFS= read -r rel; do
 done < <(cd "$dist" && find . -type f -printf '%P\n' | sort)
 
 "$HERE/surfaceflinger.sh" install
+"$HERE/services.sh" install
 
 changed=$(python3 "$HERE/settings.py" install "$cfg" "$backup/settings.json")
 echo "$changed"
