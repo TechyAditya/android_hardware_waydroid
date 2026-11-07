@@ -29,6 +29,7 @@
 #include "fractional-scale-v1-client-protocol.h"
 #include "linux-dmabuf-v1-client-protocol.h"
 #include "viewporter-client-protocol.h"
+#include "xdg-decoration-unstable-v1-client-protocol.h"
 #include "xdg-output-unstable-v1-client-protocol.h"
 #include "xdg-shell-client-protocol.h"
 
@@ -99,6 +100,7 @@ struct {
     wp_fractional_scale_manager_v1 *fractional = nullptr;
     zwp_linux_dmabuf_v1 *dmabuf = nullptr;
     zxdg_output_manager_v1 *xdg_outputs = nullptr;
+    zxdg_decoration_manager_v1 *decorations = nullptr;
     bool shm_xbgr = false;
     wl_buffer *placeholder = nullptr;
 
@@ -779,6 +781,12 @@ void create_surface(Window *w) {
     xdg_toplevel_add_listener(w->toplevel, &toplevel_listener, tag);
     xdg_toplevel_set_app_id(w->toplevel, ("waydroid." + w->pkg).c_str());
     xdg_toplevel_set_title(w->toplevel, w->title.c_str());
+    // Without this, KWin expects the window to draw its own title bar. Asked before the first
+    // commit, as the protocol requires.
+    if (g.decorations) {
+        w->decoration = zxdg_decoration_manager_v1_get_toplevel_decoration(g.decorations, w->toplevel);
+        zxdg_toplevel_decoration_v1_set_mode(w->decoration, ZXDG_TOPLEVEL_DECORATION_V1_MODE_SERVER_SIDE);
+    }
     update_size_hints(w);
     wl_surface_commit(w->surface);
 }
@@ -843,6 +851,8 @@ void destroy_window(Window *w) {
         wp_fractional_scale_v1_destroy(w->fractional);
     if (w->surface) {
         wp_viewport_destroy(w->viewport);
+        if (w->decoration)
+            zxdg_toplevel_decoration_v1_destroy(w->decoration);
         xdg_toplevel_destroy(w->toplevel);
         xdg_surface_destroy(w->xsurface);
         wl_surface_destroy(w->surface);
@@ -1117,6 +1127,8 @@ void registry_global(void *, wl_registry *registry, uint32_t name, const char *i
         g.xdg_outputs = static_cast<zxdg_output_manager_v1 *>(bind(&zxdg_output_manager_v1_interface, 3));
         for (auto &[o, out] : g.outputs)
             watch_logical_size(o);
+    } else if (!strcmp(iface, zxdg_decoration_manager_v1_interface.name)) {
+        g.decorations = static_cast<zxdg_decoration_manager_v1 *>(bind(&zxdg_decoration_manager_v1_interface, 1));
     }
 }
 void registry_remove(void *, wl_registry *, uint32_t name) {
@@ -1302,6 +1314,7 @@ void disconnect(const char *control_path) {
     g.fractional = nullptr;
     g.dmabuf = nullptr;
     g.xdg_outputs = nullptr;
+    g.decorations = nullptr;
     g.placeholder = nullptr;
     g.shm_xbgr = false;
     g.outputs.clear();

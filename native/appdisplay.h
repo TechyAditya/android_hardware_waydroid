@@ -21,6 +21,7 @@ struct wp_viewport;
 struct wp_fractional_scale_v1;
 struct xdg_surface;
 struct xdg_toplevel;
+struct zxdg_toplevel_decoration_v1;
 
 int64_t now_ms();
 
@@ -70,6 +71,7 @@ struct Window {
     wl_surface *surface = nullptr;
     xdg_surface *xsurface = nullptr;
     xdg_toplevel *toplevel = nullptr;
+    zxdg_toplevel_decoration_v1 *decoration = nullptr;
     wp_viewport *viewport = nullptr;
     wp_fractional_scale_v1 *fractional = nullptr;
 

@@ -109,6 +109,7 @@ declare -A XML=(
     [cursor-shape-v1]=$PROTOCOLS/staging/cursor-shape/cursor-shape-v1.xml
     [tablet-unstable-v2]=$PROTOCOLS/unstable/tablet/tablet-unstable-v2.xml
     [xdg-output-unstable-v1]=$PROTOCOLS/unstable/xdg-output/xdg-output-unstable-v1.xml
+    [xdg-decoration-unstable-v1]=$PROTOCOLS/unstable/xdg-decoration/xdg-decoration-unstable-v1.xml
 )
 proto_objs=()
 for name in "${!XML[@]}"; do
