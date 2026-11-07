@@ -130,7 +130,7 @@ The setting applies to every app on the desktop. If a filter chain, such as a sp
 
 ## Optional: give every app window a title bar with Back
 
-Each per-app window has a title bar. On KDE Plasma, KWin draws it with your decoration theme. On GNOME, which draws no title bars for Wayland apps, the window draws its own. It has a Back button on the left, then the window buttons of your GNOME button layout, in your light or dark style. Hyprland draws no title bars. Everywhere, Esc and the mouse's back button also act as Back.
+With `persist.waydroid.app_titlebar` at `auto`, the default, a per-app window asks the compositor for a title bar through the `xdg-decoration` protocol. Where the compositor doesn't offer the protocol, or asks the window to decorate itself, the window draws its own. It has a Back button on the left, then the window buttons of your desktop's button layout, in your light or dark style. GNOME, for example, offers no `xdg-decoration`, so its windows draw their own. KWin draws the title bar with your decoration theme. Hyprland accepts the request but draws no title bars. Everywhere, Esc and the mouse's back button also act as Back.
 
 To give windows their own title bar with the Back button on every desktop, KDE included:
 
