@@ -94,6 +94,8 @@ final class AndroidBridge {
             pointerCoords[i] = new MotionEvent.PointerCoords();
         }
         loadKeyLayout("/system/usr/keylayout/Generic.kl");
+        // Linux KEY_ESC. Android gives Esc no Back fallback for injected keys, so it would only close popups.
+        keycodes[1] = KeyEvent.KEYCODE_BACK;
     }
 
     static String prop(String name, String def) {
