@@ -404,7 +404,7 @@ I'd like to send it upstream in the shape of the notification forwarding: a medi
 
 ## 9. Desktop title bars
 
-[waydroid#1119](https://github.com/waydroid/waydroid/issues/1119) asks for title bars drawn by the compositor through `xdg-decoration-unstable-v1`. In 2023 the maintainer answered that multi-window windows are transparent full-screen surfaces that move only inside Android, so the compositor cannot frame them. He said the proper fix is one Android display per app, and that the compositor's title bar would lose Android's Back button. In these windows the mouse's back button sends BACK. Esc does not, because the helper injects keys as Android's virtual keyboard, whose key map gives Esc no BACK fallback. The last comment, from 2024, asks whether anyone is working on displays per app.
+[waydroid#1119](https://github.com/waydroid/waydroid/issues/1119) asks for title bars drawn by the compositor through `xdg-decoration-unstable-v1`. In 2023 the maintainer answered that multi-window windows are transparent full-screen surfaces that move only inside Android, so the compositor cannot frame them. He said the proper fix is one Android display per app, and that the compositor's title bar would lose Android's Back button. In these windows the mouse's back button and Esc send BACK (Esc is mapped to BACK in the helper, since Android's virtual keyboard map gives Esc no BACK fallback). The last comment, from 2024, asks whether anyone is working on displays per app.
 
 `waydroid-app-displays` runs each app on its own virtual display in its own window, and since commit `0899f94` each window asks for a server-side title bar. GNOME does not offer the protocol, so its windows stay without one.
 
@@ -413,7 +413,7 @@ I'd like to send it upstream in the shape of the notification forwarding: a medi
 ```markdown
 @ethanc8 I have one Android display per app working, outside Waydroid for now: https://github.com/TechyAditya/waydroid-app-displays. Each app runs on its own virtual display, shown in its own Wayland window, and the display resizes with the window. Because the window is the whole display, the compositor can frame it: each window asks for a server-side title bar through `xdg-decoration-unstable-v1` ([commit](https://github.com/TechyAditya/waydroid-app-displays/commit/0899f94)). On KDE Plasma 6.8, KWin draws its normal title bar with minimize, maximize and close, and maximizing resizes Android's display to fill the screen.
 
-Back still works without Android's caption: the mouse's back button sends BACK.
+Back still works without Android's caption: the mouse's back button and Esc both send BACK.
 
 GNOME does not offer `xdg-decoration`, so there the windows have no title bar yet. libdecor would cover it.
 
