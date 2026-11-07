@@ -128,6 +128,20 @@ systemctl --user restart pipewire
 
 The setting applies to every app on the desktop. If a filter chain, such as a speaker equalizer, is tuned for 48 kHz, add `node.force-rate = 48000` to that chain's properties.
 
+## Optional: give every app window a title bar with Back
+
+Each per-app window has a title bar. On KDE Plasma, KWin draws it with your decoration theme. On GNOME, which draws no title bars for Wayland apps, the window draws its own. It has a Back button on the left, then the window buttons of your GNOME button layout, in your light or dark style. Hyprland draws no title bars. Everywhere, Esc and the mouse's back button also act as Back.
+
+To give windows their own title bar with the Back button on every desktop, KDE included:
+
+```sh
+waydroid prop set persist.waydroid.app_titlebar always
+```
+
+Windows that open after this get it. On KDE, the buttons follow the order set in System Settings, and the colours follow whether your colour scheme's title bar is light or dark. The bar has no KDE-specific buttons, such as keep above. Right-click the title for KWin's window menu instead.
+
+To go back to KWin's title bars, set the property to `auto`, the default.
+
 ## Optional: keep Waydroid windows opaque on Hyprland
 
 While an app lays itself out again after a resize, Android leaves parts of its window transparent, and Hyprland's blur shows through. This window rule, for Hyprland 0.57's Lua config, makes the full Android window and the per-app windows opaque:

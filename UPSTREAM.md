@@ -407,7 +407,7 @@ I'd like to send it upstream in the shape of the notification forwarding: a medi
 
 [waydroid#1119](https://github.com/waydroid/waydroid/issues/1119) asks for title bars drawn by the compositor through `xdg-decoration-unstable-v1`. In 2023 the maintainer answered that multi-window windows are transparent full-screen surfaces that move only inside Android, so the compositor cannot frame them. He said the proper fix is one Android display per app, and that the compositor's title bar would lose Android's Back button. In these windows the mouse's back button and Esc send BACK (Esc is mapped to BACK in the helper, since Android's virtual keyboard map gives Esc no BACK fallback). On an app's first screen, stock images still ignore it, because 0032 blocks Back on a task's root activity outside the full UI; [section 10](#10-back-on-other-displays) limits that to the default display. The last comment, from 2024, asks whether anyone is working on displays per app.
 
-`waydroid-app-displays` runs each app on its own virtual display in its own window, and since commit `0899f94` each window asks for a server-side title bar. GNOME does not offer the protocol, so its windows stay without one.
+`waydroid-app-displays` runs each app on its own virtual display in its own window, and since commit `0899f94` each window asks for a server-side title bar. GNOME does not offer the protocol, so since commit `62c2d07` windows there draw their own, with a Back button.
 
 ### Comment on #1119 (not posted)
 
@@ -416,7 +416,7 @@ I'd like to send it upstream in the shape of the notification forwarding: a medi
 
 On the Back button: the mouse's back button and Esc both send BACK, so Android's caption isn't needed for it. On an app's first screen, though, BACK does nothing, because base-patches-33 0032 returns early for a task's root activity unless the full UI is active. That check makes sense for multi-window mode on the default display, but it also applies to an app on its own display. @aleasto, would you take a follow-up that applies it only on `DEFAULT_DISPLAY`? It is a 6-line patch on top of 0032: https://github.com/waydroid/android_vendor_waydroid/compare/lineage-20...TechyAditya:android_vendor_waydroid:back-other-displays. With the same check applied to `services.jar` on the 20260927 image, Back on Settings' and Clock's first screens moves the app to the back and the helper closes its window, as going home does on a phone, and Back on Settings > Storage > Free up space returns to Settings.
 
-GNOME does not offer `xdg-decoration`, so there the windows have no title bar yet. libdecor would cover it.
+GNOME does not offer `xdg-decoration`, so there each window draws its own title bar, after libadwaita's header bar, with a Back button next to the window buttons ([commit](https://github.com/TechyAditya/waydroid-app-displays/commit/62c2d07)).
 
 Tested on KDE Plasma 6.8.2 and Hyprland 0.57, on CachyOS with Waydroid 1.6.3 and the LineageOS 20 images. It runs as a separate `app_process` helper, so it is not in a shape to merge as it is.
 ```
