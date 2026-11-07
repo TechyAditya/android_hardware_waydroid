@@ -1,17 +1,17 @@
 # Upstream pull requests and issues
 
-What this fork plans to send to Waydroid, in plain words. Open so far: [#92](https://github.com/waydroid/android_hardware_waydroid/pull/92), [android_vendor_waydroid#57](https://github.com/waydroid/android_vendor_waydroid/pull/57), [#93](https://github.com/waydroid/android_hardware_waydroid/pull/93) for issue [waydroid#2470](https://github.com/waydroid/waydroid/issues/2470), [android_vendor_waydroid#58](https://github.com/waydroid/android_vendor_waydroid/pull/58) with [#94](https://github.com/waydroid/android_hardware_waydroid/pull/94) for issue [waydroid#2471](https://github.com/waydroid/waydroid/issues/2471), and [android_vendor_waydroid#59](https://github.com/waydroid/android_vendor_waydroid/pull/59). Replies are posted on [#2464](https://github.com/waydroid/waydroid/issues/2464#issuecomment-6617138955) and [#91](https://github.com/waydroid/android_hardware_waydroid/pull/91#issuecomment-6618281541), and the NVIDIA bug report is [forum thread 387942](https://forums.developer.nvidia.com/t/vulkan-some-nv12-dma-bufs-imported-as-two-plane-images-read-back-wrong-615-78-08/387942). A question about media controls is posted on [#868](https://github.com/waydroid/waydroid/issues/868#issuecomment-6686462350), and one about title bars and Back on [#1119](https://github.com/waydroid/waydroid/issues/1119#issuecomment-6704203289). Nothing else has been posted.
+What this fork plans to send to Waydroid, in plain words. Merged on 2026-11-07 by aleasto: [android_vendor_waydroid#57](https://github.com/waydroid/android_vendor_waydroid/pull/57), [#58](https://github.com/waydroid/android_vendor_waydroid/pull/58), and [#59](https://github.com/waydroid/android_vendor_waydroid/pull/59). Open, each with his first review questions from 2026-11-07: [#92](https://github.com/waydroid/android_hardware_waydroid/pull/92), [#93](https://github.com/waydroid/android_hardware_waydroid/pull/93) for issue [waydroid#2470](https://github.com/waydroid/waydroid/issues/2470), and [#94](https://github.com/waydroid/android_hardware_waydroid/pull/94) for issue [waydroid#2471](https://github.com/waydroid/waydroid/issues/2471). The draft answers are under "Reply to review" in sections 1, 3, and 4. Replies are posted on [#2464](https://github.com/waydroid/waydroid/issues/2464#issuecomment-6617138955) and [#91](https://github.com/waydroid/android_hardware_waydroid/pull/91#issuecomment-6618281541), and the NVIDIA bug report is [forum thread 387942](https://forums.developer.nvidia.com/t/vulkan-some-nv12-dma-bufs-imported-as-two-plane-images-read-back-wrong-615-78-08/387942). A question about media controls is posted on [#868](https://github.com/waydroid/waydroid/issues/868#issuecomment-6686462350), and one about title bars and Back on [#1119](https://github.com/waydroid/waydroid/issues/1119#issuecomment-6704203289). Nothing else has been posted.
 
-1. **Smoother window resizing, without the crash.** Dragging a window edge made Android rebuild its screen about 150 times in 8 seconds, and Android's graphics crashed during the rebuilds ([#2464](https://github.com/waydroid/waydroid/issues/2464)). [#92](https://github.com/waydroid/android_hardware_waydroid/pull/92) cuts the rebuilds to about 15 and stretches the old frame meanwhile. It is open. [android_vendor_waydroid#57](https://github.com/waydroid/android_vendor_waydroid/pull/57), also open, adds the missing null check that SurfaceFlinger crashed on. After both are merged, ask the reporter to confirm that the SurfaceFlinger crash and the composer deaths are both gone, then close #2464. [Drafts](#1-resizing-and-the-surfaceflinger-crash)
+1. **Smoother window resizing, without the crash.** Dragging a window edge made Android rebuild its screen about 150 times in 8 seconds, and Android's graphics crashed during the rebuilds ([#2464](https://github.com/waydroid/waydroid/issues/2464)). [#92](https://github.com/waydroid/android_hardware_waydroid/pull/92) cuts the rebuilds to about 15 and stretches the old frame meanwhile. It is open; the maintainer asked why it is needed now that the null check is merged. [android_vendor_waydroid#57](https://github.com/waydroid/android_vendor_waydroid/pull/57), the null check that SurfaceFlinger crashed on, is merged, and the maintainer closed #2464. [Drafts](#1-resizing-and-the-surfaceflinger-crash)
 2. **No more black flashes in the full Waydroid window.** The window was shown before Android finished drawing it. One PR. [Draft](#2-black-flashes-in-the-full-ui)
 3. **Several app windows behave.** Each window keeps its own size and closes with its app. Closing the full Waydroid window closes only its own apps. Android follows the monitor's refresh rate. Open as issue [waydroid#2470](https://github.com/waydroid/waydroid/issues/2470) and PR [#93](https://github.com/waydroid/android_hardware_waydroid/pull/93). [Drafts](#3-several-app-windows)
-4. **Video shows in its own colours.** Ordinary (SDR) video no longer looks washed out, because Android stops brightening its dark parts; stock Waydroid does this too. HDR video shows as HDR when the compositor runs the monitor in HDR mode. Open as issue [waydroid#2471](https://github.com/waydroid/waydroid/issues/2471), with PRs [android_vendor_waydroid#58](https://github.com/waydroid/android_vendor_waydroid/pull/58) and [#94](https://github.com/waydroid/android_hardware_waydroid/pull/94). [Drafts](#4-video-colours)
+4. **Video shows in its own colours.** Ordinary (SDR) video no longer looks washed out, because Android stops brightening its dark parts; stock Waydroid does this too. HDR video shows as HDR when the compositor runs the monitor in HDR mode. Open as issue [waydroid#2471](https://github.com/waydroid/waydroid/issues/2471). [android_vendor_waydroid#58](https://github.com/waydroid/android_vendor_waydroid/pull/58) is merged; [#94](https://github.com/waydroid/android_hardware_waydroid/pull/94) is open. [Drafts](#4-video-colours)
 5. **No audio crackles at high sample rates.** Posted as [a comment](https://github.com/waydroid/android_hardware_waydroid/pull/91#issuecomment-6618281541) on [#91](https://github.com/waydroid/android_hardware_waydroid/pull/91), someone else's open audio PR, which already has half of the fix. [Draft](#5-audio-at-high-sample-rates)
 6. **Video buffers in GPU memory go straight to the compositor.** On hold: upstream has nothing that creates those buffers yet. [Note](#6-gpu-memory-buffers-as-dma-bufs)
 7. **Bug report to NVIDIA.** Their driver misreads some video buffers, which shows as green or colourless frames. Posted as [forum thread 387942](https://forums.developer.nvidia.com/t/vulkan-some-nv12-dma-bufs-imported-as-two-plane-images-read-back-wrong-615-78-08/387942), with a small program that shows the bug. [Draft](#7-nvidia-misreads-two-plane-nv12-imports)
 8. **Android media players in the desktop's media controls.** Apple Music, YouTube and other players show in the desktop's media widget with their title, cover and position, and take play, pause, skip and seek. Requested in [waydroid#868](https://github.com/waydroid/waydroid/issues/868) since 2023. Two PRs, one in `android_frameworks_waydroid` and one in `waydroid/waydroid`, built the way Waydroid already forwards notifications. [Asked the maintainer on #868](https://github.com/waydroid/waydroid/issues/868#issuecomment-6686462350) how he wants the PRs; not written yet. The fork's working version runs as a separate helper, which upstream would not take as it is. [Plan](#8-media-controls-over-mpris)
 9. **Desktop title bars on app windows.** On KDE, each app window gets KWin's own title bar, with minimize, maximize and close. Where the compositor draws none, as on GNOME, the window draws its own, with a Back button next to the window buttons. Requested in [waydroid#1119](https://github.com/waydroid/waydroid/issues/1119), where the maintainer said it needs one Android display per app. The fork's `waydroid-app-displays` has that, so it is a comment on the issue, not a PR. [Posted](https://github.com/waydroid/waydroid/issues/1119#issuecomment-6704203289) on 2026-11-07; it also asks the maintainer about the Back patch in item 10. [Draft](#9-desktop-title-bars)
-10. **Back leaves an app's first screen on other displays.** Waydroid's patch 0032 ignores Back on a task's first screen unless the full UI is active, so an app on its own display could never leave its first screen. A new vendor patch keeps that rule on the default display only. Open as [android_vendor_waydroid#59](https://github.com/waydroid/android_vendor_waydroid/pull/59). [Draft](#10-back-on-other-displays)
+10. **Back leaves an app's first screen on other displays.** Waydroid's patch 0032 ignores Back on a task's first screen unless the full UI is active, so an app on its own display could never leave its first screen. A new vendor patch keeps that rule on the default display only. Merged as [android_vendor_waydroid#59](https://github.com/waydroid/android_vendor_waydroid/pull/59) on 2026-11-07. [Draft](#10-back-on-other-displays)
 
 Every head branch below starts from upstream `lineage-20` and is on `TechyAditya/android_hardware_waydroid` unless it says otherwise. Each one compiles alone with `stack/build.sh`. The changes ran together in the `all-fixes` build, not branch by branch. To open a pull request from a draft, save the body to a file and run:
 
@@ -60,6 +60,38 @@ Posted on 2026-11-04 as [this comment](https://github.com/waydroid/waydroid/issu
 2. The composer deaths (SIGABRT, and signal 13 at 10:37:16), after which SurfaceFlinger aborts. I could not find their cause, but they stopped for me with waydroid/android_hardware_waydroid#92 and `persist.waydroid.resize_interval_ms = 500` (step 2). Your Intel GPU uses `gralloc=gbm`, and the composer from that PR works with it.
 
 Could you try both and say whether launching and resizing still crash? If either crash comes back, `coredumpctl list` and `waydroid logcat` around it would help. I only tested on Hyprland 0.57 with an NVIDIA GPU.
+```
+
+The maintainer merged #57, closed #2464 on 2026-11-07, and answered the composer deaths: "that is somewhat expected and not something we should consider needing a fix".
+
+### Reply to review on #92 (draft)
+
+The maintainer asked on 2026-11-07: "I wouldn't go add this complexity only to leave it off by default. Is there a good reason for this, other than making the surfaceflinger crash less likely, which we've now already fixed?"
+
+Measured on 2026-11-08 with a drag script built on the gist's `test-resize.sh`: a floating single-window Settings window on Hyprland 0.57, resized through `hyprctl` in exact steps, with #57's check in place as the 5-byte binary patch. Interval 0 is upstream's path: `request_hotplug()` calls `do_hotplug()` directly when no timer exists. The composer was the `all-fixes` build, so it also had #93 and #94; neither changes when a drag of one window hotplugs. The first runs tracked only SurfaceFlinger and composer restarts; later runs also tracked `system_server` and kept the full log, so the crash column counts what each run could see.
+
+```markdown
+Yes. With #57 merged, a fast drag still crashes Android, just in other places. I tested on the same machine today, with #57's check in place, using this PR at `resize_interval_ms` 0 (upstream's path: `do_hotplug()` on every configure that changes the size) against 150 and 500. A script resizes a floating single-window Settings window on Hyprland 0.57 in exact steps:
+
+| Drag | Interval | Runs | Hotplugs per drag | Android CPU time per drag | Crashes |
+| --- | --- | --- | --- | --- | --- |
+| 600 resizes in 5 s, about what a mouse drag sends | 0 | 7 | 351 to 421 | 34 to 37 s | `system_server` restarted in all 4 runs where I tracked it; SurfaceFlinger crashed in 1 of the other 3 |
+| | 150 | 6 | 31 to 35 | 3 to 8 s | none |
+| | 500 | 6 | 10 to 18 | 3.5 to 4.6 s | none |
+| 160 resizes in 6 s | 0 | 5 | 159 to 160 | 15 to 18 s | Launcher aborted in at least 3 |
+| | 150 | 4 | 42 to 43 | 4 to 9 s | none |
+| 150 resizes in 16 s | 0 | 3 | 141 to 150 | 14 to 28 s | none seen |
+| | 150 | 2 | 109 | 11 to 18 s | none |
+
+The crashes, none of which #57 touches:
+
+1. `system_server`: `IllegalStateException: Unable to locate mode -1` in `DisplayInfo.findMode()`, from `LogicalDisplayMapper.updateLogicalDisplaysLocked()` on the `android.display` thread. Zygote then restarts, which closes every app. waydroid/waydroid#2436 logs the same missing mode (`Can't find display mode with id -1`) on an Intel GPU.
+2. SurfaceFlinger: SIGSEGV in `HWComposer::hasDisplayCapability()`, called from `getDynamicDisplayInfo()` on a binder thread: the display is still in `mDisplayData`, but its `hwcDisplay` is null.
+3. Apps: `drawRenderNode called on a context with no surface!` in hwui, in Launcher, Settings and SystemUI.
+
+#84 reports a fourth one, in `HWC2::impl::Display::present()`, after hotplug bursts on an Intel GPU with KDE. Each could get its own check, but they all come from reconnecting the display hundreds of times during one drag, and the rate limit removes that. Android also spends less CPU time on the drag: 3 to 8 s instead of 34 to 37 s for the fast one.
+
+About leaving it off by default: agreed, that makes little sense. I can make 150 ms the default, which is what I run, and keep the property to tune it or set it to 0. At 150 ms, Android still follows a drag about 7 times a second, and it reaches the final window size 250 to 300 ms after the drag ends.
 ```
 
 ## 2. Black flashes in the full UI
@@ -175,6 +207,34 @@ These commits ran together in my build on Hyprland 0.57, CachyOS, an NVIDIA RTX 
 This branch alone was compiled, not run. I built the module outside the AOSP tree against the Android 13 VNDK v33 headers, so it has not been through a Soong build. I tested one monitor, not the two-monitor case in waydroid/waydroid#973.
 ```
 
+### Reply to review (draft)
+
+On 2026-11-07 the maintainer wrote "Not a full review yet since this is quite large" and left three inline questions. One reply per thread:
+
+On `wayland-hwc.cpp` in `c91136d`, "none of this is related, is it?":
+
+```markdown
+It is, though the diff doesn't show why. Before this commit, only this handler erased a window. This commit adds a second place: when Android leaves a task, `hwc_set()` closes that task's window. `removeTask()` is what makes Android leave the task, and it waits on a binder call while SurfaceFlinger keeps composing, so `hwc_set()` can erase and free `window` before `removeTask()` returns. The old code read `window->display`, `window->taskID` and `window->appID` after that call. Copying them first keeps the handler from reading the freed window; the `window->display` to `display` changes are the same fix.
+
+Commit 3 then replaces this with a lookup that also covers the other handlers. If it's easier to review, I can move this hunk into commit 3, so that this commit only adds the closing.
+```
+
+On `wayland-hwc.h` in `5f64b75`, "how is this different from display::windows?":
+
+```markdown
+`display::windows` owns the windows, keyed by task or app ID, under `windowsMutex`. `live_windows` answers another question: is the `window *` that Wayland passes to a listener as `data` still alive? A listener has only that pointer, not the key, and it can't take `windowsMutex`: `hwc_set()` holds it while `window::create()` waits in `wl_display_roundtrip()` for the new window's configure, which the Wayland thread dispatches, so a listener that took it would deadlock.
+
+Commit 3 replaces the pointer set with `liveWindows`, which maps an ID that is never reused to the window, under its own `liveWindowsMutex`, because a freed pointer can come back as a new window. I can fold the set into commit 3, so that only the final form is in the series.
+```
+
+On `wayland-hwc.cpp` in `dae5b49`, "> which is built without exceptions ?":
+
+```markdown
+Soong compiles C++ with `-fno-exceptions` unless a module adds `-fexceptions` ([global.go](https://android.googlesource.com/platform/build/soong/+/refs/heads/android13-release/cc/config/global.go)), and this module doesn't. `std::stoi` itself is in libc++ and still throws `std::invalid_argument` or `std::out_of_range`, but nothing in the composer can catch it, so a bad id aborts the composer. The comment says that badly; I'll change it to "std::stoi throws on a malformed id, and the composer cannot catch it".
+
+I haven't seen a malformed id, though: the ids come from SurfaceFlinger's `TID:<id>#...` layer names, so this is defensive. If you'd rather keep `stoi`, I'll drop the commit.
+```
+
 ## 4. Video colours
 
 Posted on 2026-11-04 as issue [waydroid/waydroid#2471](https://github.com/waydroid/waydroid/issues/2471), PR [waydroid/android_vendor_waydroid#58](https://github.com/waydroid/android_vendor_waydroid/pull/58) from `TechyAditya:hdr`, and PR [waydroid/android_hardware_waydroid#94](https://github.com/waydroid/android_hardware_waydroid/pull/94) from `TechyAditya:pr/hdr-output`. The drafts below use `ISSUE`, `PR1`, and `PR2` for those numbers. The Bugbot and GPT-5.6 Sol findings worth fixing on #94 are folded into its commit, now `26797a7`, and its description below is the current one. Both reviewers found nothing in #58.
@@ -275,6 +335,22 @@ Android reads the HDR capabilities when the display connects. Turning the output
 ## Testing
 
 Tested on one HDR panel with Hyprland's HDR mode on, Hyprland 0.57, and LineageOS 20 images. Outputs in SDR mode report no HDR, so nothing changes there. This branch alone was compiled, not run.
+```
+
+### Reply to review on #94 (draft)
+
+The maintainer asked on 2026-11-07: "I presume this has not been tested on GBM gralloc yet?"
+
+Tested on 2026-11-08. This machine has only the NVIDIA GPU, so Waydroid ran on a `vgem` node (`modprobe vgem`, `drm_device = /dev/dri/card0`, the vgem card node, because Mesa allocates dumb buffers and the kernel refuses them on render nodes). Waydroid then generated the same properties as on Intel and AMD, `ro.hardware.gralloc=gbm` (`minigbm_gbm_mesa` on this vendor image) and `ro.hardware.egl=mesa`, and Mesa rendered with llvmpipe. Hyprland on NVIDIA showed vgem's dma-bufs as a black window with this branch and with `lineage-20` alike, so Android's side was checked with `screencap`. Clips: HDR10 HEVC Main10, and VP9 Profile 2 tagged BT.2020 PQ, played in Gallery.
+
+```markdown
+Not until now. I have no Intel or AMD GPU, so I ran Waydroid on a vgem node: it then picks `ro.hardware.gralloc=gbm` (minigbm `gbm_mesa`) and `ro.hardware.egl=mesa` as on Intel and AMD, and Mesa renders with llvmpipe. I compared this branch with `lineage-20` on the same setup.
+
+- With the output in HDR mode, this branch reports HDR10 and HLG on GBM too (`mSupportedHdrTypes=[2, 3]`, 400 nits), and nothing crashed. The UI renders the same as with `lineage-20`.
+- The video path never runs on GBM, because GBM gralloc can't allocate P010. minigbm maps `HAL_PIXEL_FORMAT_YCBCR_P010` to `DRM_FORMAT_P010`, but the `gbm_mesa` backend registers no P010 combination (`gbm_mesa_internals.cpp`). Android 13's VP9 and AV1 software decoders output P010 only when gralloc can allocate it, and its HEVC software decoder has no 10-bit profile at all.
+- So HDR video on GBM looks the same with and without this branch: a VP9 Profile 2 HDR10 clip decodes, reaches SurfaceFlinger as an `RGB_565` layer tagged `BT2020_PQ` through NuPlayer's software renderer, and SurfaceFlinger composites it; the screenshots match `lineage-20`. An HDR10 HEVC clip fails with `Failed to create video/hevc decoder` on both.
+
+What this branch adds on GBM, then, is only the HDR capability report. An app that picks an HDR stream from the display's capabilities alone could choose one the decoders can't output as HDR. I'd make the composer report HDR only when gralloc can allocate a P010 buffer, checked once at start, so GBM stays as it is today. P010 in the `gbm_mesa` backend would then enable the rest on GBM, but I can't test that without the hardware. Would that work for you?
 ```
 
 ## 5. Audio at high sample rates
