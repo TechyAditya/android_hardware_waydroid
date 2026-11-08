@@ -349,8 +349,8 @@ xdg_toplevel_handle_configure(void *data, struct xdg_toplevel *,
 static void
 send_key_event(display *data, uint32_t key, wl_keyboard_key_state state);
 
-// Returns the decimal task id in ID, or -1. Ids come from layer names, and
-// std::stoi would abort the composer, which is built without exceptions.
+// Returns the decimal task id in ID, or -1. Ids come from layer names, and std::stoi throws on
+// a malformed one, which the composer, built with -fno-exceptions, cannot catch.
 int
 parse_task_id(const std::string &id)
 {

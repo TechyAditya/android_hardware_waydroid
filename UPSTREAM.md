@@ -205,7 +205,9 @@ This branch alone was compiled, not run. I built the module outside the AOSP tre
 
 On 2026-11-08 the refresh-rate wording was narrowed in the commit message (head `f5a52d9`, code unchanged), in the PR description, and in the issue's last line. A test on KDE Plasma 6.8.2 with a 60 Hz virtual monitor (KRDP `--virtual-monitor` with a local FreeRDP client) showed why: with per-app windows, `waydroid-app-displays` switched Android to 60 Hz and back to 165.019 Hz on every move, and the app kept drawing at scale 1 and 1.6; with only the composer's window, Android stayed at 165.02 Hz on the 60 Hz monitor.
 
-### Reply to review (draft)
+### Reply to review (posted)
+
+Posted on 2026-11-08 after a Bugbot review of head `f5a52d9`, which found no bugs: [on the close handler](https://github.com/waydroid/android_hardware_waydroid/pull/93#discussion_r4505991707), [on `live_windows`](https://github.com/waydroid/android_hardware_waydroid/pull/93#discussion_r4505991820), and [on `std::stoi`](https://github.com/waydroid/android_hardware_waydroid/pull/93#discussion_r4505991911). The `std::stoi` comment and commit message were reworded in `206558d` (head `9e44127`), and that thread is resolved; the other two answer questions and stay open for the maintainer. The offers to move the close-handler hunk and the pointer set into commit 3 were dropped, because commits 1 and 2 would then read freed windows. The drafts below are the versions before those changes.
 
 On 2026-11-07 the maintainer wrote "Not a full review yet since this is quite large" and left three inline questions. One reply per thread:
 
