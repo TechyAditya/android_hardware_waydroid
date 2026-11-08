@@ -14,6 +14,13 @@ public final class Main {
             Log.i(TAG, "disabled by persist.waydroid.app_displays");
             return;
         }
+        // Windows share gralloc.default's buffers with the compositor; `waydroid app launch` then
+        // falls back to Waydroid's own windows
+        String gralloc = AndroidBridge.prop("ro.hardware.gralloc", "default");
+        if (!gralloc.equals("default")) {
+            Log.i(TAG, "disabled: Android's gralloc is " + gralloc + ", not gralloc.default");
+            return;
+        }
         System.load(DIR + "/libappdisplay.so");
         if (!Native.dropToSystem()) {
             Log.e(TAG, "cannot switch to the system user");
