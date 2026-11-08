@@ -1,0 +1,98 @@
+#!/usr/bin/env python3
+"""Chooses the GPU Waydroid renders with. Runs as root before Waydroid's container starts.
+
+`gpu` in the [waydroid] section of waydroid.cfg picks the GPU:
+
+  auto    (default) an Intel or AMD GPU when there is one, as stock Waydroid does;
+          Venus on the NVIDIA GPU when it is the only GPU
+  nvidia  Venus on the NVIDIA GPU, even when an Intel or AMD GPU is present
+
+It sets drm_device and the Venus properties in waydroid.cfg to match, then runs
+`waydroid upgrade --offline` so that Android gets the new properties. The render node
+numbers change with a laptop's MUX mode, so drm_device is set on every start.
+
+--props prints the Venus properties as JSON, for install.sh.
+"""
+import configparser
+import glob
+import json
+import os
+import subprocess
+import sys
+
+CFG = "/var/lib/waydroid/waydroid.cfg"
+SYSFS = os.environ.get("WAYDROID_VENUS_SYSFS", "/sys/class/drm")
+PROPS = {
+    "ro.hardware.egl": "angle",
+    "ro.hardware.vulkan": "virtio",
+    "mesa.vn.debug": "vtest",
+    "mesa.vtest.socket.name": "/data/venus/vtest.sock",
+    # media_codecs_waydroid.xml, which adds the OMX.waydroid decoders
+    "ro.media.xml_variant.codecs": "_waydroid",
+}
+
+
+def render_nodes():
+    """(node, kernel driver) of each render node of a PCI GPU, so vgem and the like don't count."""
+    nodes = []
+    for path in sorted(glob.glob(os.path.join(SYSFS, "renderD*"))):
+        device = os.path.realpath(os.path.join(path, "device"))
+        if "/pci" not in device:
+            continue
+        driver = os.path.basename(os.path.realpath(os.path.join(device, "driver")))
+        nodes.append(("/dev/dri/" + os.path.basename(path), driver))
+    return nodes
+
+
+def choose(mode, nodes):
+    """Returns (venus, drm_device): whether Venus runs, and the node Waydroid should use."""
+    nvidia = [node for node, driver in nodes if driver == "nvidia"]
+    others = [node for node, driver in nodes if driver != "nvidia"]
+    if nvidia and (mode == "nvidia" or not others):
+        return True, nvidia[0]
+    return False, others[0] if others else None
+
+
+def main():
+    if sys.argv[1:] == ["--props"]:
+        print(json.dumps(PROPS))
+        return 0
+    cfg = configparser.ConfigParser()
+    if not cfg.read(CFG) or not cfg.has_section("waydroid"):
+        print(f"{CFG} is missing; is Waydroid initialized?", file=sys.stderr)
+        return 0
+    mode = cfg["waydroid"].get("gpu", "auto").strip().lower()
+    if mode not in ("auto", "nvidia"):
+        print(f"unknown gpu = {mode} in {CFG}; using auto", file=sys.stderr)
+        mode = "auto"
+    nodes = render_nodes()
+    venus, node = choose(mode, nodes)
+    if mode == "nvidia" and not venus:
+        print("gpu = nvidia, but there is no NVIDIA GPU; using the other GPU", file=sys.stderr)
+
+    before = {key: dict(cfg[key]) for key in cfg.sections()}
+    if node:
+        cfg["waydroid"]["drm_device"] = node
+    else:
+        cfg.remove_option("waydroid", "drm_device")
+    if not cfg.has_section("properties"):
+        cfg.add_section("properties")
+    for key, value in PROPS.items():
+        if venus:
+            cfg["properties"][key] = value
+        elif cfg["properties"].get(key) == value:
+            cfg.remove_option("properties", key)
+
+    what = "Venus on the NVIDIA GPU" if venus else "Waydroid's own graphics"
+    print(f"gpu = {mode}: {what}, drm_device = {node or 'none'}")
+    if {key: dict(cfg[key]) for key in cfg.sections()} == before:
+        return 0
+    with open(CFG + ".new", "w") as f:
+        cfg.write(f)
+    os.replace(CFG + ".new", CFG)
+    # waydroid_base.prop, which Android reads, only changes with an upgrade
+    return subprocess.call(["/usr/bin/waydroid", "upgrade", "--offline"])
+
+
+if __name__ == "__main__":
+    sys.exit(main())

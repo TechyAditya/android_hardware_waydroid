@@ -22,6 +22,8 @@ alloc_unit=/etc/systemd/system/waydroid-alloc.service
 sysusers=/etc/sysusers.d/waydroid-venus.conf
 hwdec_unit=/etc/systemd/system/waydroid-hwdec.service
 hwdec_sysusers=/etc/sysusers.d/waydroid-hwdec.conf
+# picks the GPU before each container start (waydroid-venus-gpu)
+gpu_dropin=/etc/systemd/system/waydroid-container.service.d/00-waydroid-venus-gpu.conf
 socket_dir=$home/.local/share/waydroid/data/venus
 # earlier versions ran the server as a user service
 legacy_unit=$home/.config/systemd/user/waydroid-venus.service
@@ -44,7 +46,7 @@ for file in "${modules[@]/#/$out/}" "${hwdec_files[@]/#/$out/}" \
    "$host/bin/waydroid-hwdec" \
    "$here/android/waydroid-venus-recover.sh" "$here/android/waydroid-venus.rc" \
    "$here/waydroid-venus.service" "$here/waydroid-alloc.service" "$here/waydroid-venus.sysusers" \
-   "$here/waydroid-hwdec.service" "$here/waydroid-hwdec.sysusers"; do
+   "$here/waydroid-hwdec.service" "$here/waydroid-hwdec.sysusers" "$here/waydroid-venus-gpu"; do
    if [ ! -f "$file" ]; then
       echo "missing $file" >&2
       missing=1
@@ -102,7 +104,7 @@ rollback() {
 }
 trap rollback ERR
 
-save "$prefix" "$cfg" "$backup" "$unit" "$alloc_unit" "$sysusers" "$hwdec_unit" "$hwdec_sysusers" \
+save "$prefix" "$cfg" "$backup" "$unit" "$alloc_unit" "$sysusers" "$hwdec_unit" "$hwdec_sysusers" "$gpu_dropin" \
    "${overlay_files[@]}" "${hwdec_files[@]/#/$overlay/}" \
    "$overlay/bin/waydroid-venus-recover.sh" "$overlay/etc/init/waydroid-venus.rc"
 
@@ -115,6 +117,7 @@ cp -a "$host" "$prefix.new"
 chown -R root:root "$prefix.new"
 rm -rf "$prefix"
 mv "$prefix.new" "$prefix"
+install -D -m 0755 "$here/waydroid-venus-gpu" "$prefix/bin/waydroid-venus-gpu"
 
 for i in "${!modules[@]}"; do
    install -D -m 0644 "$out/${modules[$i]}" "${overlay_files[$i]}"
@@ -129,17 +132,10 @@ install -D -m 0644 "$here/android/waydroid-venus.rc" \
 
 legacy=0
 [ -f "$legacy_unit" ] && legacy=1
-python3 - "$cfg" "$backup" "$legacy" <<'EOF'
-import configparser, json, os, sys
+python3 - "$cfg" "$backup" "$legacy" "$prefix/bin/waydroid-venus-gpu" <<'EOF'
+import configparser, json, os, subprocess, sys
 cfg_path, backup_path, legacy = sys.argv[1], sys.argv[2], sys.argv[3] == "1"
-props = {
-    "ro.hardware.egl": "angle",
-    "ro.hardware.vulkan": "virtio",
-    "mesa.vn.debug": "vtest",
-    "mesa.vtest.socket.name": "/data/venus/vtest.sock",
-    # media_codecs_waydroid.xml, which adds the OMX.waydroid decoders
-    "ro.media.xml_variant.codecs": "_waydroid",
-}
+props = json.loads(subprocess.check_output([sys.argv[4], "--props"]))
 cfg = configparser.ConfigParser()
 cfg.read(cfg_path)
 if not cfg.has_section("properties"):
@@ -172,6 +168,8 @@ for service in waydroid-venus waydroid-alloc waydroid-hwdec; do
    sed -e "s|@PREFIX@|$prefix|g" -e "s|@SOCKET_DIR@|$socket_dir|g" -e "s|@USER@|$user|g" \
       "$here/$service.service" > "/etc/systemd/system/$service.service"
 done
+printf '[Service]\nExecStartPre=%s\n' "$prefix/bin/waydroid-venus-gpu" > "$tx/gpu-dropin.conf"
+install -D -m 0644 "$tx/gpu-dropin.conf" "$gpu_dropin"
 systemctl daemon-reload
 systemctl enable waydroid-venus.service waydroid-alloc.service waydroid-hwdec.service
 systemctl restart waydroid-venus.service waydroid-alloc.service waydroid-hwdec.service
@@ -201,6 +199,8 @@ else
       "run its build.sh as $user, then this script again"
 fi
 
+# sets drm_device and the Venus properties for this boot's GPUs
+"$prefix/bin/waydroid-venus-gpu"
 # regenerates waydroid_base.prop and restarts a running container
 waydroid upgrade --offline
 

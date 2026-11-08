@@ -18,6 +18,10 @@ hwdec_sysusers=/etc/sysusers.d/waydroid-hwdec.conf
 socket_dir=$home/.local/share/waydroid/data/venus
 legacy_unit=$home/.config/systemd/user/waydroid-venus.service
 
+# first, so that no container start picks the Venus properties again
+rm -f /etc/systemd/system/waydroid-container.service.d/00-waydroid-venus-gpu.conf
+systemctl daemon-reload
+
 python3 - "$cfg" "$backup" <<'EOF'
 import configparser, json, os, sys
 cfg_path, backup_path = sys.argv[1:]
