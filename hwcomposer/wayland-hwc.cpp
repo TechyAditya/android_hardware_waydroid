@@ -2355,7 +2355,7 @@ create_display(const char *gralloc)
     display->multi_windows = property_get_bool("persist.waydroid.multi_windows", false);
     display->size_window = nullptr;
     display->last_active_apps_serial = 0;
-    display->resize_interval_ms = property_get_int32("persist.waydroid.resize_interval_ms", 0);
+    display->resize_interval_ms = property_get_int32("persist.waydroid.resize_interval_ms", 150);
     display->hotplug_timer_fd = -1;
     display->hotplug_pending = false;
     display->display = wl_display_connect(NULL);

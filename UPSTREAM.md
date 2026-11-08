@@ -2,7 +2,7 @@
 
 What this fork plans to send to Waydroid, in plain words. Merged on 2026-11-07 by aleasto: [android_vendor_waydroid#57](https://github.com/waydroid/android_vendor_waydroid/pull/57), [#58](https://github.com/waydroid/android_vendor_waydroid/pull/58), and [#59](https://github.com/waydroid/android_vendor_waydroid/pull/59). Open, each with his first review questions from 2026-11-07: [#92](https://github.com/waydroid/android_hardware_waydroid/pull/92), [#93](https://github.com/waydroid/android_hardware_waydroid/pull/93) for issue [waydroid#2470](https://github.com/waydroid/waydroid/issues/2470), and [#94](https://github.com/waydroid/android_hardware_waydroid/pull/94) for issue [waydroid#2471](https://github.com/waydroid/waydroid/issues/2471). The draft answers are under "Reply to review" in sections 1, 3, and 4. Replies are posted on [#2464](https://github.com/waydroid/waydroid/issues/2464#issuecomment-6617138955) and [#91](https://github.com/waydroid/android_hardware_waydroid/pull/91#issuecomment-6618281541), and the NVIDIA bug report is [forum thread 387942](https://forums.developer.nvidia.com/t/vulkan-some-nv12-dma-bufs-imported-as-two-plane-images-read-back-wrong-615-78-08/387942). A question about media controls is posted on [#868](https://github.com/waydroid/waydroid/issues/868#issuecomment-6686462350), and one about title bars and Back on [#1119](https://github.com/waydroid/waydroid/issues/1119#issuecomment-6704203289). Nothing else has been posted.
 
-1. **Smoother window resizing, without the crash.** Dragging a window edge made Android rebuild its screen about 150 times in 8 seconds, and Android's graphics crashed during the rebuilds ([#2464](https://github.com/waydroid/waydroid/issues/2464)). [#92](https://github.com/waydroid/android_hardware_waydroid/pull/92) cuts the rebuilds to about 15 and stretches the old frame meanwhile. It is open; the maintainer asked why it is needed now that the null check is merged. [android_vendor_waydroid#57](https://github.com/waydroid/android_vendor_waydroid/pull/57), the null check that SurfaceFlinger crashed on, is merged, and the maintainer closed #2464. [Drafts](#1-resizing-and-the-surfaceflinger-crash)
+1. **Smoother window resizing, without the crash.** Dragging a window edge made Android rebuild its screen about 150 times in 8 seconds, and Android's graphics crashed during the rebuilds ([#2464](https://github.com/waydroid/waydroid/issues/2464)). [#92](https://github.com/waydroid/android_hardware_waydroid/pull/92) cuts the rebuilds to about 15 and stretches the old frame meanwhile. It is open, with 150 ms as the default since the maintainer asked why it should stay off by default once the null check was merged. [android_vendor_waydroid#57](https://github.com/waydroid/android_vendor_waydroid/pull/57), the null check that SurfaceFlinger crashed on, is merged, and the maintainer closed #2464. [Drafts](#1-resizing-and-the-surfaceflinger-crash)
 2. **No more black flashes in the full Waydroid window.** The window was shown before Android finished drawing it. One PR. [Draft](#2-black-flashes-in-the-full-ui)
 3. **Several app windows behave.** Each window keeps its own size and closes with its app. Closing the full Waydroid window closes only its own apps. Android follows the monitor's refresh rate. Open as issue [waydroid#2470](https://github.com/waydroid/waydroid/issues/2470) and PR [#93](https://github.com/waydroid/android_hardware_waydroid/pull/93). [Drafts](#3-several-app-windows)
 4. **Video shows in its own colours.** Ordinary (SDR) video no longer looks washed out, because Android stops brightening its dark parts; stock Waydroid does this too. HDR video shows as HDR when the compositor runs the monitor in HDR mode. Open as issue [waydroid#2471](https://github.com/waydroid/waydroid/issues/2471). [android_vendor_waydroid#58](https://github.com/waydroid/android_vendor_waydroid/pull/58) is merged; [#94](https://github.com/waydroid/android_hardware_waydroid/pull/94) is open. [Drafts](#4-video-colours)
@@ -21,7 +21,7 @@ gh pr create -R waydroid/REPO -B lineage-20 -H TechyAditya:BRANCH --title "TITLE
 
 ## 1. Resizing and the SurfaceFlinger crash
 
-[#92](https://github.com/waydroid/android_hardware_waydroid/pull/92) is open. Its description is current, and every review thread is resolved. It mitigates #2464 but does not fix it: the option is off by default, and a launch still reconnects the display once.
+[#92](https://github.com/waydroid/android_hardware_waydroid/pull/92) is open. Its description is current, and every review thread is resolved. Its interval is 150 ms by default since 2026-11-08, and 0 turns it off. A launch still reconnects the display once.
 
 #2464 can close once both PRs are merged and the reporter confirms that both crashes are gone: the SurfaceFlinger SIGSEGV, and the composer deaths (SIGABRT, signal 13) after which SurfaceFlinger aborts. The SurfaceFlinger patch fixes the first. The composer deaths have no confirmed cause; #92 made them stop on this setup. So neither PR says "Fixes", which would close the issue on merge. Close it by hand after the reporter replies.
 
@@ -64,18 +64,23 @@ Could you try both and say whether launching and resizing still crash? If either
 
 The maintainer merged #57, closed #2464 on 2026-11-07, and answered the composer deaths: "that is somewhat expected and not something we should consider needing a fix".
 
-### Reply to review on #92 (draft)
+### Reply to review on #92 (posted)
 
 The maintainer asked on 2026-11-07: "I wouldn't go add this complexity only to leave it off by default. Is there a good reason for this, other than making the surfaceflinger crash less likely, which we've now already fixed?"
 
-Measured on 2026-11-08 with a drag script built on the gist's `test-resize.sh`: a floating single-window Settings window on Hyprland 0.57, resized through `hyprctl` in exact steps, with #57's check in place as the 5-byte binary patch. Interval 0 is upstream's path: `request_hotplug()` calls `do_hotplug()` directly when no timer exists. The composer was the `all-fixes` build, so it also had #93 and #94; neither changes when a drag of one window hotplugs. The first runs tracked only SurfaceFlinger and composer restarts; later runs also tracked `system_server` and kept the full log, so the crash column counts what each run could see.
+On 2026-11-08 the default became 150 ms, folded into the first commit (head `ae18101`), and the PR description got the measurements below in place of the old "experimental, default 0" text. [Posted](https://github.com/waydroid/android_hardware_waydroid/pull/92#issuecomment-6718369707):
 
 ```markdown
-Yes. With #57 merged, a fast drag still crashes Android, just in other places. I tested on the same machine today, with #57's check in place, using this PR at `resize_interval_ms` 0 (upstream's path: `do_hotplug()` on every configure that changes the size) against 150 and 500. A script resizes a floating single-window Settings window on Hyprland 0.57 in exact steps:
+Right, I forgot to update the default. It's 150 ms now (ae18101), and 0 turns it off.
+
+With #57 in place, fast drags at 0 still crash Android elsewhere: `system_server` on `Unable to locate mode -1`, and SurfaceFlinger in `HWComposer::hasDisplayCapability()`. I put the measurements in the description.
+```
+
+Measured on 2026-11-08 with a drag script built on the gist's `test-resize.sh`: a floating single-window Settings window on Hyprland 0.57, resized through `hyprctl` in exact steps, with #57's check in place as the 5-byte binary patch. Interval 0 is upstream's path: `request_hotplug()` calls `do_hotplug()` directly when no timer exists. The composer was the `all-fixes` build, so it also had #93 and #94; neither changes when a drag of one window hotplugs. The first runs tracked only SurfaceFlinger and composer restarts; later runs also tracked `system_server` and kept the full log, so the crash column counts what each run could see.
 
 | Drag | Interval | Runs | Hotplugs per drag | Android CPU time per drag | Crashes |
 | --- | --- | --- | --- | --- | --- |
-| 600 resizes in 5 s, about what a mouse drag sends | 0 | 7 | 351 to 421 | 34 to 37 s | `system_server` restarted in all 4 runs where I tracked it; SurfaceFlinger crashed in 1 of the other 3 |
+| 600 resizes in 5 s | 0 | 7 | 351 to 421 | 34 to 37 s | `system_server` restarted in all 4 runs where it was tracked; SurfaceFlinger crashed in 1 of the other 3 |
 | | 150 | 6 | 31 to 35 | 3 to 8 s | none |
 | | 500 | 6 | 10 to 18 | 3.5 to 4.6 s | none |
 | 160 resizes in 6 s | 0 | 5 | 159 to 160 | 15 to 18 s | Launcher aborted in at least 3 |
@@ -83,16 +88,7 @@ Yes. With #57 merged, a fast drag still crashes Android, just in other places. I
 | 150 resizes in 16 s | 0 | 3 | 141 to 150 | 14 to 28 s | none seen |
 | | 150 | 2 | 109 | 11 to 18 s | none |
 
-The crashes, none of which #57 touches:
-
-1. `system_server`: `IllegalStateException: Unable to locate mode -1` in `DisplayInfo.findMode()`, from `LogicalDisplayMapper.updateLogicalDisplaysLocked()` on the `android.display` thread. Zygote then restarts, which closes every app. waydroid/waydroid#2436 logs the same missing mode (`Can't find display mode with id -1`) on an Intel GPU.
-2. SurfaceFlinger: SIGSEGV in `HWComposer::hasDisplayCapability()`, called from `getDynamicDisplayInfo()` on a binder thread: the display is still in `mDisplayData`, but its `hwcDisplay` is null.
-3. Apps: `drawRenderNode called on a context with no surface!` in hwui, in Launcher, Settings and SystemUI.
-
-#84 reports a fourth one, in `HWC2::impl::Display::present()`, after hotplug bursts on an Intel GPU with KDE. Each could get its own check, but they all come from reconnecting the display hundreds of times during one drag, and the rate limit removes that. Android also spends less CPU time on the drag: 3 to 8 s instead of 34 to 37 s for the fast one.
-
-About leaving it off by default: agreed, that makes little sense. I can make 150 ms the default, which is what I run, and keep the property to tune it or set it to 0. At 150 ms, Android still follows a drag about 7 times a second, and it reaches the final window size 250 to 300 ms after the drag ends.
-```
+The crashes at 0, none of which #57 touches: `system_server` with `IllegalStateException: Unable to locate mode -1` in `DisplayInfo.findMode()` from `LogicalDisplayMapper.updateLogicalDisplaysLocked()`, which restarts zygote (waydroid/waydroid#2436 logs the same missing mode on an Intel GPU); SurfaceFlinger with a SIGSEGV in `HWComposer::hasDisplayCapability()` from `getDynamicDisplayInfo()`, where the display is still in `mDisplayData` but its `hwcDisplay` is null; and apps with `drawRenderNode called on a context with no surface!` in hwui. #84 reports a fourth, in `HWC2::impl::Display::present()`, on an Intel GPU with KDE.
 
 ## 2. Black flashes in the full UI
 

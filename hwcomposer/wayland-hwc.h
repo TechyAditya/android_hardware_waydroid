@@ -422,7 +422,7 @@ struct display {
     std::string last_target_tid;
     uint32_t last_active_apps_serial;
 
-    // Experimental (persist.waydroid.resize_interval_ms): minimum time between resize hotplugs; 0 disables, 500 suggested
+    // persist.waydroid.resize_interval_ms: minimum time between resize hotplugs, 150 by default; 0 disables
     int resize_interval_ms;
     int hotplug_timer_fd;
     std::mutex hotplug_mutex;

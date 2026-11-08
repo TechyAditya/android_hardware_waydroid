@@ -89,7 +89,7 @@ The installers keep the files and properties they replace. Each part's `uninstal
 | --- | --- | --- | --- |
 | `[waydroid] suspend_action` | `none` | `freeze` | Android keeps running when its screen turns off, so apps in their own windows and the media controls stay live. |
 | `persist.waydroid.multi_windows` | `false` | `false` | The full Android window shows one app at a time and follows its window size. The install writes it so that an earlier `true` doesn't stay. |
-| `persist.waydroid.resize_interval_ms` | `150` | `0` | While you drag a window edge, Android's display resizes at most once every 150 milliseconds. The last frame stretches to fill the window in between. |
+| `persist.waydroid.resize_interval_ms` | `150` | no limit: upstream's composer hotplugs on every resize | While you drag a window edge, Android's display resizes at most once every 150 milliseconds. The last frame stretches to fill the window in between. |
 | `debug.stagefright.ccodec` | `4` | `0` on NVIDIA, unset on other GPUs | Android's Codec2 codecs are on. Screen recording and scrcpy encode with them. Waydroid turns them off when it falls back to software rendering, which it does on NVIDIA. |
 
 `waydroid-venus/install.sh` writes the graphics and codec properties: `ro.hardware.egl=angle`, `ro.hardware.vulkan=virtio`, `mesa.vn.debug=vtest`, `mesa.vtest.socket.name=/data/venus/vtest.sock`, and `ro.media.xml_variant.codecs=_waydroid`.
