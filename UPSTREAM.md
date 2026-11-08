@@ -164,7 +164,7 @@ Each window shows its app at its own size and closes with its app. Closing the f
 - Waydroid 1.6.3, LineageOS 20 images (system 20260927, vendor 20261022)
 - Hyprland 0.57 on CachyOS, NVIDIA RTX 3060 Laptop GPU (driver 615), 165 Hz panel
 
-waydroid/android_hardware_waydroid#93 fixes items 4 to 8.
+waydroid/android_hardware_waydroid#93 fixes items 4 to 7. For item 8, it offers a display config for every monitor's rate, with the exact period; it does not switch Android to the rate of the monitor a window is on.
 ```
 
 ### PR
@@ -172,7 +172,7 @@ waydroid/android_hardware_waydroid#93 fixes items 4 to 8.
 Title: `hwcomposer: fix window size, lifetime and focus, full UI close, and refresh rate with several windows`
 
 ```markdown
-Fixes items 4 to 8 of waydroid/waydroid#2470. Items 1 to 3 are multi-window mode problems that this PR does not change. For the resize crash, see waydroid/waydroid#2464 and #92.
+Fixes items 4 to 7 of waydroid/waydroid#2470, and the fixed refresh rate in item 8. Items 1 to 3 are multi-window mode problems that this PR does not change. For the resize crash, see waydroid/waydroid#2464 and #92.
 
 ## Changes
 
@@ -189,7 +189,7 @@ Full UI:
 
 Refresh rate:
 
-6. `hwcomposer: offer a display config for each monitor refresh rate` tracks each output's current mode and offers one config per rate seen since the composer started, with the exact period (165.018 Hz is 6059945 ns). `setActiveConfig` switches the vsync period, so Android changes rate with a normal mode switch. A new rate is added with a hotplug, and the list never shrinks.
+6. `hwcomposer: offer a display config for each monitor refresh rate` tracks each output's current mode and offers one config per rate seen since the composer started, with the exact period (165.018 Hz is 6059945 ns). `setActiveConfig` switches the vsync period, so Android changes rate with a normal mode switch. A new rate is added with a hotplug, and the list never shrinks. Which config is active stays Android's choice, within the `min_refresh_rate` and `peak_refresh_rate` settings: the composer does not pick the rate of the monitor a window is on, so moving a window to a slower monitor does not change the rate by itself.
 
 Multi-window mode is unchanged, apart from commit 6, which applies to every mode.
 
@@ -202,6 +202,8 @@ These commits ran together in my build on Hyprland 0.57, CachyOS, an NVIDIA RTX 
 
 This branch alone was compiled, not run. I built the module outside the AOSP tree against the Android 13 VNDK v33 headers, so it has not been through a Soong build. I tested one monitor, not the two-monitor case in waydroid/waydroid#973.
 ```
+
+On 2026-11-08 the refresh-rate wording was narrowed in the commit message (head `f5a52d9`, code unchanged), in the PR description, and in the issue's last line. A test on KDE Plasma 6.8.2 with a 60 Hz virtual monitor (KRDP `--virtual-monitor` with a local FreeRDP client) showed why: with per-app windows, `waydroid-app-displays` switched Android to 60 Hz and back to 165.019 Hz on every move, and the app kept drawing at scale 1 and 1.6; with only the composer's window, Android stayed at 165.02 Hz on the 60 Hz monitor.
 
 ### Reply to review (draft)
 

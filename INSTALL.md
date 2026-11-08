@@ -177,7 +177,7 @@ To remove Widevine, run `sudo ./waydroid-venus/uninstall-widevine.sh`. It also r
 - To open an app in its own window, run `waydroid app launch PACKAGE`, for example `waydroid app launch com.google.android.youtube`. Waydroid's desktop entries run the same command, so app launchers open separate windows too.
 - To open the whole Android screen in one window, run `waydroid show-full-ui`.
 
-The composer follows the refresh rate of the monitor that shows each window, so moving a window to another monitor changes Android's frame rate.
+Android follows the refresh rate of the monitors that show app windows: the per-app window service sets Android's refresh rate settings to the fastest monitor showing one, and the composer offers a display config for every monitor's rate. Moving an app window to a 60 Hz monitor switches Android to 60 Hz. The full Android window does not follow, so Android keeps its rate there.
 
 Android media players, such as Apple Music or YouTube, show in the desktop's media controls through MPRIS, like a browser or Spotify does. They show the title, the cover, and the position, and they take play, pause, skip, and seek.
 
