@@ -341,16 +341,20 @@ Tested on one HDR panel with Hyprland's HDR mode on, Hyprland 0.57, and LineageO
 
 The maintainer asked on 2026-11-07: "I presume this has not been tested on GBM gralloc yet?"
 
-Tested on 2026-11-08. This machine has only the NVIDIA GPU, so Waydroid ran on a `vgem` node (`modprobe vgem`, `drm_device = /dev/dri/card0`, the vgem card node, because Mesa allocates dumb buffers and the kernel refuses them on render nodes). Waydroid then generated the same properties as on Intel and AMD, `ro.hardware.gralloc=gbm` (`minigbm_gbm_mesa` on this vendor image) and `ro.hardware.egl=mesa`, and Mesa rendered with llvmpipe. Hyprland on NVIDIA showed vgem's dma-bufs as a black window with this branch and with `lineage-20` alike, so Android's side was checked with `screencap`. Clips: HDR10 HEVC Main10, and VP9 Profile 2 tagged BT.2020 PQ, played in Gallery.
+Tested on 2026-11-08 on the laptop's AMD iGPU, with the MUX in hybrid mode: Radeon Vega (Renoir), radeonsi, Mesa 26.0.8 in the vendor image. Waydroid generated its own properties for it: `ro.hardware.gralloc=gbm` (`minigbm_gbm_mesa` on this vendor image), `ro.hardware.egl=mesa`, `ro.hardware.vulkan=radeon` and `debug.stagefright.ccodec=0`. The overlay held this fork's other files too; only the composer was swapped between this branch and `lineage-20`. Hyprland 0.57 ran on the same AMD GPU with HDR mode on. Clips: HDR10 HEVC Main10 and VP9 Profile 2 tagged BT.2020 PQ, played in Gallery, with Codec2 off (Waydroid's default) and on. Screenshots came from both Android's `screencap` and the host.
+
+An earlier run on a `vgem` node (`drm_device = /dev/dri/card0`, Mesa on llvmpipe) gave the same results, but Hyprland on NVIDIA could not show vgem's dma-bufs, so that run is superseded.
+
+The laptop panel does not enter real HDR when the AMD GPU drives it on Linux, in Hyprland or Plasma, although Windows HDR works through the same GPU. That is a kernel or panel issue, separate from this PR, so the reply makes no claim about how HDR looked.
 
 ```markdown
-Not until now. I have no Intel or AMD GPU, so I ran Waydroid on a vgem node: it then picks `ro.hardware.gralloc=gbm` (minigbm `gbm_mesa`) and `ro.hardware.egl=mesa` as on Intel and AMD, and Mesa renders with llvmpipe. I compared this branch with `lineage-20` on the same setup.
+Not until now. I've since tested it on GBM gralloc on an AMD GPU (Radeon Vega, Renoir, radeonsi), with the properties Waydroid generates there: `ro.hardware.gralloc=gbm` (minigbm `gbm_mesa`), `ro.hardware.egl=mesa`, `ro.hardware.vulkan=radeon`. I compared this branch with `lineage-20` on the same setup, with Hyprland's HDR mode on.
 
-- With the output in HDR mode, this branch reports HDR10 and HLG on GBM too (`mSupportedHdrTypes=[2, 3]`, 400 nits), and nothing crashed. The UI renders the same as with `lineage-20`.
+- This branch reports HDR10 and HLG on GBM too (`mSupportedHdrTypes=[2, 3]`, 400 nits), the UI renders as with `lineage-20`, and nothing crashed.
 - The video path never runs on GBM, because GBM gralloc can't allocate P010. minigbm maps `HAL_PIXEL_FORMAT_YCBCR_P010` to `DRM_FORMAT_P010`, but the `gbm_mesa` backend registers no P010 combination (`gbm_mesa_internals.cpp`). Android 13's VP9 and AV1 software decoders output P010 only when gralloc can allocate it, and its HEVC software decoder has no 10-bit profile at all.
-- So HDR video on GBM looks the same with and without this branch: a VP9 Profile 2 HDR10 clip decodes, reaches SurfaceFlinger as an `RGB_565` layer tagged `BT2020_PQ` through NuPlayer's software renderer, and SurfaceFlinger composites it; the screenshots match `lineage-20`. An HDR10 HEVC clip fails with `Failed to create video/hevc decoder` on both.
+- So HDR video looks the same with and without this branch. With Waydroid's default `debug.stagefright.ccodec=0`, neither clip plays with either composer: HEVC Main10 fails with `Failed to create video/hevc decoder`, and VP9 Profile 2 shows black through the OMX decoder. With Codec2 on, VP9 Profile 2 decodes and reaches SurfaceFlinger as an `RGB_565` layer tagged `BT2020_PQ`, and the frames match `lineage-20`'s both in Android and on the host.
 
-What this branch adds on GBM, then, is only the HDR capability report. An app that picks an HDR stream from the display's capabilities alone could choose one the decoders can't output as HDR. I'd make the composer report HDR only when gralloc can allocate a P010 buffer, checked once at start, so GBM stays as it is today. P010 in the `gbm_mesa` backend would then enable the rest on GBM, but I can't test that without the hardware. Would that work for you?
+So on GBM this branch only adds the HDR capability report, and an app that picks an HDR stream from the display's capabilities alone could choose one the decoders can't output as HDR. I'd make the composer report HDR only when gralloc can allocate a P010 buffer, checked once at start, so GBM setups stay as they are today until a gralloc there offers P010. Would that work for you?
 ```
 
 ## 5. Audio at high sample rates
