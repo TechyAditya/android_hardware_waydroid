@@ -4,12 +4,12 @@ What this fork plans to send to Waydroid, in plain words. Merged on 2026-11-07 b
 
 1. **Smoother window resizing, without the crash.** Dragging a window edge made Android rebuild its screen about 150 times in 8 seconds, and Android's graphics crashed during the rebuilds ([#2464](https://github.com/waydroid/waydroid/issues/2464)). [#92](https://github.com/waydroid/android_hardware_waydroid/pull/92) cuts the rebuilds to about 15 and stretches the old frame meanwhile. It is open, with 150 ms as the default since the maintainer asked why it should stay off by default once the null check was merged. [android_vendor_waydroid#57](https://github.com/waydroid/android_vendor_waydroid/pull/57), the null check that SurfaceFlinger crashed on, is merged, and the maintainer closed #2464. [Drafts](#1-resizing-and-the-surfaceflinger-crash)
 2. **No more black flashes in the full Waydroid window.** The window was shown before Android finished drawing it. One PR. [Draft](#2-black-flashes-in-the-full-ui)
-3. **Several app windows behave.** Each window keeps its own size and closes with its app. Closing the full Waydroid window closes only its own apps. Android follows the monitor's refresh rate. Open as issue [waydroid#2470](https://github.com/waydroid/waydroid/issues/2470) and PR [#93](https://github.com/waydroid/android_hardware_waydroid/pull/93). [Drafts](#3-several-app-windows)
+3. **Several app windows behave.** Each window keeps its own size and closes with its app. Closing the full Waydroid window closes only its own apps. Android follows the monitor's refresh rate. Open as issue [waydroid#2470](https://github.com/waydroid/waydroid/issues/2470) and PR [#93](https://github.com/waydroid/android_hardware_waydroid/pull/93). Planned: move #93's refresh-rate commit into its own PR, which shrinks #93 by almost half, then, if the maintainer wants it, a follow-up in which Android follows the monitor a window is on. [Drafts and plan](#3-several-app-windows)
 4. **Video shows in its own colours.** Ordinary (SDR) video no longer looks washed out, because Android stops brightening its dark parts; stock Waydroid does this too. HDR video shows as HDR when the compositor runs the monitor in HDR mode. Open as issue [waydroid#2471](https://github.com/waydroid/waydroid/issues/2471). [android_vendor_waydroid#58](https://github.com/waydroid/android_vendor_waydroid/pull/58) is merged; [#94](https://github.com/waydroid/android_hardware_waydroid/pull/94) is open. [Drafts](#4-video-colours)
 5. **No audio crackles at high sample rates.** Posted as [a comment](https://github.com/waydroid/android_hardware_waydroid/pull/91#issuecomment-6618281541) on [#91](https://github.com/waydroid/android_hardware_waydroid/pull/91), someone else's open audio PR, which already has half of the fix. [Draft](#5-audio-at-high-sample-rates)
 6. **Video buffers in GPU memory go straight to the compositor.** On hold: upstream has nothing that creates those buffers yet. [Note](#6-gpu-memory-buffers-as-dma-bufs)
 7. **Bug report to NVIDIA.** Their driver misreads some video buffers, which shows as green or colourless frames. Posted as [forum thread 387942](https://forums.developer.nvidia.com/t/vulkan-some-nv12-dma-bufs-imported-as-two-plane-images-read-back-wrong-615-78-08/387942), with a small program that shows the bug. [Draft](#7-nvidia-misreads-two-plane-nv12-imports)
-8. **Android media players in the desktop's media controls.** Apple Music, YouTube and other players show in the desktop's media widget with their title, cover and position, and take play, pause, skip and seek. Requested in [waydroid#868](https://github.com/waydroid/waydroid/issues/868) since 2023. Two PRs, one in `android_frameworks_waydroid` and one in `waydroid/waydroid`, built the way Waydroid already forwards notifications. [Asked the maintainer on #868](https://github.com/waydroid/waydroid/issues/868#issuecomment-6686462350) how he wants the PRs; not written yet. The fork's working version runs as a separate helper, which upstream would not take as it is. [Plan](#8-media-controls-over-mpris)
+8. **Android media players in the desktop's media controls.** Apple Music, YouTube and other players show in the desktop's media widget with their title, cover and position, and take play, pause, skip and seek. Requested in [waydroid#868](https://github.com/waydroid/waydroid/issues/868) since 2023. Two PRs, one in `android_frameworks_waydroid` and one in `waydroid/waydroid`, built the way Waydroid already forwards notifications. [Asked the maintainer on #868](https://github.com/waydroid/waydroid/issues/868#issuecomment-6686462350) how he wants the PRs; no reply yet, and not written yet. The fork's working version runs as a separate helper, which upstream would not take as it is. [Plan](#8-media-controls-over-mpris)
 9. **Desktop title bars on app windows.** On KDE, each app window gets KWin's own title bar, with minimize, maximize and close. Where the compositor draws none, as on GNOME, the window draws its own, with a Back button next to the window buttons. Requested in [waydroid#1119](https://github.com/waydroid/waydroid/issues/1119), where the maintainer said it needs one Android display per app. The fork's `waydroid-app-displays` has that, so it is a comment on the issue, not a PR. [Posted](https://github.com/waydroid/waydroid/issues/1119#issuecomment-6704203289) on 2026-11-07; it also asks the maintainer about the Back patch in item 10. [Draft](#9-desktop-title-bars)
 10. **Back leaves an app's first screen on other displays.** Waydroid's patch 0032 ignores Back on a task's first screen unless the full UI is active, so an app on its own display could never leave its first screen. A new vendor patch keeps that rule on the default display only. Merged as [android_vendor_waydroid#59](https://github.com/waydroid/android_vendor_waydroid/pull/59) on 2026-11-07. [Draft](#10-back-on-other-displays)
 
@@ -234,6 +234,71 @@ Soong compiles C++ with `-fno-exceptions` unless a module adds `-fexceptions` ([
 
 I haven't seen a malformed id, though: the ids come from SurfaceFlinger's `TID:<id>#...` layer names, so this is defensive. If you'd rather keep `stoi`, I'll drop the commit.
 ```
+
+### Plan: the refresh rate as its own PR
+
+Not started. The maintainer called #93 "quite large", and its last commit, `9e44127` "hwcomposer: offer a display config for each monitor refresh rate", is almost half of it. That commit touches other code than the five commits he commented on, none of his threads are on it, and on 2026-11-08 it applied cleanly to `lineage-20` on its own.
+
+| | Commits | Size |
+| --- | --- | --- |
+| #93 after the split | `5f64b75`, `c91136d`, `20155e3`, `f850c26`, `206558d` | 5 files, +258/−43 |
+| New PR | `9e44127`, cherry-picked onto `lineage-20` | 6 files, +236/−23 |
+
+Steps:
+
+1. Recreate `pr/refresh-rates` from `lineage-20` with `9e44127` cherry-picked. It replaces the stale branch of that name (`dd1d698`, 2026-11-04), which has an older version of the commit on top of the audio commits. Compile it with `stack/build.sh`.
+2. Run that branch alone, which nothing has done yet. In hybrid MUX mode with `gpu = auto`, Android runs stock GBM graphics on the AMD GPU, so only this composer differs from upstream. Install its `hwcomposer.waydroid.so`, plug in a 60 Hz monitor next to the 165 Hz panel (`gnome/vmon.py` or KRDP's virtual monitor, from `~/.local/share/waydroid-test`), and check:
+   - `dumpsys SurfaceFlinger` lists a config at 165.02 Hz and one at 60 Hz, each with the exact period;
+   - `settings put system peak_refresh_rate 60` with `min_refresh_rate 60` switches Android to 60 Hz, and setting both back to 165.018 returns it to 165.02 Hz;
+   - apps keep drawing across each switch, checked with `draws.sh`;
+   - with no settings changed, Android stays at 165.02 Hz.
+3. Force-push `pr/multi-window` to `206558d` with `--force-with-lease=pr/multi-window:9e44127`. The five commits keep their SHAs, so the review threads stay attached.
+4. Open the new PR with the draft below, filling in step 2's results.
+5. Edit #93's description: drop change 6 and the "Refresh rate" heading, change the first line to "Fixes items 4 to 7 of waydroid/waydroid#2470", and add "The refresh rate change moved to #NEW to keep this PR reviewable." Post that sentence as a comment on #93 too. Change #2470's last line to name both PRs.
+6. Update the top list and this section.
+
+Title: `hwcomposer: offer a display config for each monitor refresh rate`
+
+```markdown
+Fixes the fixed refresh rate in item 8 of waydroid/waydroid#2470. It was the last commit of #93, split out to keep that PR reviewable.
+
+## Problem
+
+The primary display has one config. Its vsync period is fixed at boot from the highest mode any output advertises, rounded to whole Hz. A 165.018 Hz panel gets a 165 Hz period, and Android can't run at another monitor's rate. waydroid/waydroid#973 reports the same with two monitors.
+
+## Change
+
+The composer tracks each output's current mode and offers one config per refresh rate seen since it started, with the exact period (165.018 Hz is 6059945 ns). `setActiveConfig` switches the vsync period, so Android changes rate with a normal mode switch.
+
+A rate not seen before is added with a primary display hotplug. The list never shrinks, so that happens only when a monitor with a new rate appears. Switching rates by hotplug instead stalled apps on virtual displays when the switch came with a density change.
+
+Which config is active stays Android's choice, within the `min_refresh_rate` and `peak_refresh_rate` settings. The composer doesn't pick the rate of the monitor a window is on, so moving a window to a 60 Hz monitor leaves Android at its peak rate.
+
+## Testing
+
+This branch alone, on Waydroid 1.6.3 with the LineageOS 20 images and Mesa on an AMD iGPU, with a 60 Hz monitor next to a 165 Hz panel:
+
+STEP 2 RESULTS
+
+In my combined build, a separate service that sets both settings to the rate of the monitor showing an app's window switched Android to 60.00 Hz and back to 165.02 Hz on every move, on KDE Plasma 6.8.2 and GNOME 51, and apps kept drawing.
+
+I built the module outside the AOSP tree against the Android 13 VNDK v33 headers, so it has not been through a Soong build.
+
+If you'd like Android to follow the monitor a window is on, I can send that as a follow-up. It would add a `setRefreshRate()` to the task HAL that sets the two settings through `waydroidplatform`, with no framework change.
+```
+
+### Plan: Android follows the monitor (follow-up PR)
+
+After the refresh-rate PR, and only if the maintainer wants it; the PR above asks. Android would switch to the rate of the fastest monitor that shows an Android window, as `waydroid-app-displays` does in this fork. Two repositories:
+
+- **`waydroid/android_hardware_waydroid`:**
+  1. `interfaces/task/1.1/IWaydroidTask.hal` extends 1.0 with `setRefreshRate(uint32_t millihertz)`, as `window` went from 1.0 to 1.2. The task HAL already gets `waydroidplatform`'s `IPlatform` for `getAppName()`. The new method writes `peak_refresh_rate` and `min_refresh_rate` with `settingsPutString(1 /* SETTINGS_SYSTEM */, KEY, "165.018")`. It moves the bound in the direction of the change first, so the range is never empty. `IPlatform.settingsPutString` is already in `WayDroidService`, so `android_frameworks_waydroid` doesn't change.
+  2. The composer adds a `wl_surface_listener` to each window and records the outputs each surface enters and leaves. When those outputs or their modes change, and the set has held still for 300 ms (a window dragged across monitors enters several), it calls `setRefreshRate()` with the fastest. In single-window mode and the full UI, that's the primary display's windows; in multi-window mode, every window of the shared display. It uses `IWaydroidTask::castFrom` and skips the call when only the 1.0 service is there.
+- **`waydroid/android_device_waydroid_waydroid`:** `manifest.xml` declares `vendor.waydroid.task` at version 1.0; it would declare 1.1.
+
+Open question for the maintainer: the settings are the same ones as Settings > Display > Smooth display, so following the monitor overrides the user's choice there. It could be on by default or behind a property such as `persist.waydroid.follow_refresh_rate`.
+
+Testing: the same procedure as step 2 above, but moving windows between the monitors with no settings changed by hand, in the full UI and in single-window mode. Compare with the fork's per-app service, which already passes that test on KDE and GNOME.
 
 ## 4. Video colours
 
@@ -466,12 +531,31 @@ Waydroid's compositor reads Android's video buffers this way through Venus, so s
 
 ## 8. Media controls over MPRIS
 
-[waydroid#868](https://github.com/waydroid/waydroid/issues/868) asks for Android's media players on the host's MPRIS interface. It is open, and its last answers point to KDE Connect as a workaround. The fork's `waydroid-app-displays` does it today with a separate `app_process` helper and a socket in `/data`. Upstream would build it the way it forwards notifications, so the PRs are a port, not a copy:
+[waydroid#868](https://github.com/waydroid/waydroid/issues/868) asks for Android's media players on the host's MPRIS interface. It is open, and its last answers point to KDE Connect as a workaround. The fork's `waydroid-app-displays` does it today with a separate `app_process` helper (`Media.java`, `MediaSessions.java`, 443 lines) and a socket in `/data`, read by the host command's `mpris` mode. Upstream would build it the way it forwards notifications, so the PRs are a port, not a copy.
 
-- **`waydroid/android_frameworks_waydroid`**, like [`5c6283d`](https://github.com/waydroid/android_frameworks_waydroid/commit/5c6283dbe205e82cc893338c8fffc9fb46411871) "WayDroidService: Add notification manager". A new `IMediaPlayers.aidl` and `MediaPlayers.java` client, and in `WayDroidService` a `MediaSessionManager` listener for active sessions with a `MediaController.Callback` on each. It sends the package, title, artist, album, length, playback state, position, and a scaled cover to the host. A host callback runs play, pause, next, previous, seek, and raise through `MediaController.TransportControls`. The repository has taken no pull requests so far, so ask on #868 how the maintainer wants it.
-- **`waydroid/waydroid`**, like [`21da80c`](https://github.com/waydroid/waydroid/commit/21da80c) "services: Add new notification manager". `tools/interfaces/IMediaPlayers.py` and `tools/services/media_manager.py`, which publish one `org.mpris.MediaPlayer2.waydroid.PACKAGE` player per session on the session bus with `DesktopEntry` `waydroid.PACKAGE`, through dbus-python as `notification_manager.py` does.
+### Plan: two PRs
 
-Testing: the host service can run against the fork's helper speaking the same binder interface. The `WayDroidService` part runs only in a system image built with it, so it would compile against the framework but run untested, the same as the other PRs that were built outside AOSP.
+Waiting for the maintainer. The question on #868 was posted on 2026-11-06 and had no reply on 2026-11-08. `android_frameworks_waydroid` has never had a pull request, so the first step is his answer on where the Android half goes. If there is no reply by 2026-11-13, open both PRs as drafts anyway, each linking #868 and the other PR, and say in the first one that it is the repository's first PR.
+
+How it works, in the shape of the notification forwarding: the host serves a binder interface that Android calls, and Android registers a callback for commands from the host.
+
+**PR 1, `waydroid/android_frameworks_waydroid`**, file by file like [`5c6283d`](https://github.com/waydroid/android_frameworks_waydroid/commit/5c6283dbe205e82cc893338c8fffc9fb46411871) "WayDroidService: Add notification manager":
+
+- `core/java/id/waydro/waydroid/IMediaPlayers.aidl`: `registerCallback(in IMediaPlayersCallback callback)`, `update(in Player player)` and `remove(String id)`. `Player` is a parcelable with the session id, package, app name, title, artist, album, length, playback state, position and the time it was read, speed, the actions the session supports, and the cover as JPEG bytes. `IMediaPlayersCallback.onCommand(String id, String command, long arg)` takes `play`, `pause`, `playpause`, `stop`, `next`, `previous`, `seek` and `raise`.
+- `core/java/id/waydro/waydroid/MediaPlayers.java`: the client, like `Notifications.java`.
+- `core/java/id/waydro/app/WaydroidContextConstants.java`: the service name.
+- `services/java/id/waydro/server/WayDroidService.java`: a `MediaSessionManager.OnActiveSessionsChangedListener`, and a `MediaController.Callback` on each session. Updates are coalesced over 50 ms, and covers are scaled to 512 pixels, both as `MediaSessions.java` does. Commands run through `MediaController.TransportControls`, and `raise` launches the app.
+
+**PR 2, `waydroid/waydroid`**, file by file like [`21da80c`](https://github.com/waydroid/waydroid/commit/21da80c) "services: Add new notification manager":
+
+- `tools/interfaces/IMediaPlayers.py` and `IMediaPlayersCallback.py`: the binder interface through gbinder, like `INotifications.py`.
+- `tools/services/media_manager.py`: one `org.mpris.MediaPlayer2.waydroid.PACKAGE` player per session on the session bus, with a numbered suffix for a second session of the same app. `DesktopEntry` is `waydroid.PACKAGE`, so the desktop shows the app's icon. Covers go to files in `$XDG_RUNTIME_DIR` for `mpris:artUrl`. `Position` is computed from the last position, its time and the speed, and `Seeked` is sent when it jumps. It uses dbus-python, as `notification_manager.py` does; the fork's `mpris` mode uses Gio, so its 200 lines are rewritten, not copied.
+- `tools/services/__init__.py` and `tools/actions/session_manager.py`: start and stop it with the session.
+
+Testing:
+
+- **Host PR:** runs for real. A test build of the fork's helper would call `IMediaPlayers` instead of its socket. It runs as `system` in `app_process`, like `WayDroidService`'s user, so it should reach the host's binder service the same way. Check with `playerctl` and the desktop's media widget on Hyprland, KDE and GNOME: metadata, cover and position for Apple Music and YouTube; play, pause, next, previous and seek; two players at once; a closed player disappears; and stopping the session removes every player.
+- **Framework PR:** compiles against the LineageOS 20 framework, but runs only in a system image built with it. Building one needs a full LineageOS 20 tree, so say in the PR that this half ran only as the fork's helper with the same logic.
 
 ### Comment on #868 (posted)
 
