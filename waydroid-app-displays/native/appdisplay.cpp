@@ -105,6 +105,8 @@ struct {
     wl_subcompositor *subcompositor = nullptr;
     bool shm_xbgr = false;
     bool shm_abgr = false;
+    // The compositor accepted a buffer in GPU memory from the allocator on this connection.
+    bool gpu_buffers = false;
     wl_buffer *placeholder = nullptr;
 
     std::map<uint32_t, std::unique_ptr<Window>> windows;
@@ -282,16 +284,86 @@ void on_image(void *context, AImageReader *) {
     post(msg);
 }
 
+struct ProbeResult {
+    bool done = false, accepted = false;
+};
+
+void probe_created(void *data, zwp_linux_buffer_params_v1 *, wl_buffer *buffer) {
+    wl_buffer_destroy(buffer);
+    auto *result = static_cast<ProbeResult *>(data);
+    result->done = result->accepted = true;
+}
+
+void probe_failed(void *data, zwp_linux_buffer_params_v1 *) {
+    static_cast<ProbeResult *>(data)->done = true;
+}
+
+const zwp_linux_buffer_params_v1_listener probe_listener = {probe_created, probe_failed};
+
+// Offers the compositor one buffer in GPU memory from the allocator. Mutter fails a create_immed
+// that it can't import, and the failure ends the connection; the non-fatal create request reports
+// it instead. Returns false, and readers use system memory, when the compositor refuses.
+bool probe_gpu_buffers() {
+    if (!g.dmabuf || !g.get_native_handle)
+        return false;
+    AHardwareBuffer_Desc desc{};
+    desc.width = 256;
+    desc.height = 256;
+    desc.layers = 1;
+    desc.format = AHARDWAREBUFFER_FORMAT_R8G8B8A8_UNORM;
+    desc.usage = AHARDWAREBUFFER_USAGE_GPU_SAMPLED_IMAGE | AHARDWAREBUFFER_USAGE_GPU_COLOR_OUTPUT |
+            kUsageGpuMemory;
+    AHardwareBuffer *hb = nullptr;
+    if (AHardwareBuffer_allocate(&desc, &hb) != 0) {
+        ALOGE("probe: AHardwareBuffer_allocate failed");
+        return false;
+    }
+    AHardwareBuffer_describe(hb, &desc);
+    const native_handle_layout *h = g.get_native_handle(hb);
+    if (!h || h->numFds < 1 || h->numInts < 4 || h->data[h->numFds] != kGrallocMagic) {
+        ALOGE("probe: buffer isn't from gralloc.default");
+        AHardwareBuffer_release(hb);
+        return false;
+    }
+    const int *ints = h->data + h->numFds;
+    if (!(ints[1] & kGrallocGpuMemory) || h->numInts < 13) {
+        ALOGW("probe: the allocator didn't put the buffer in GPU memory");
+        AHardwareBuffer_release(hb);
+        return false;
+    }
+    const uint64_t modifier = (uint64_t(uint32_t(ints[12])) << 32) | uint32_t(ints[11]);
+    const uint32_t format = g.shm_xbgr ? kDrmFormatXbgr8888 : kDrmFormatAbgr8888;
+
+    ProbeResult result;
+    zwp_linux_buffer_params_v1 *params = zwp_linux_dmabuf_v1_create_params(g.dmabuf);
+    zwp_linux_buffer_params_v1_add_listener(params, &probe_listener, &result);
+    zwp_linux_buffer_params_v1_add(params, h->data[0], 0, uint32_t(ints[3]), desc.stride * 4,
+            uint32_t(ints[12]), uint32_t(ints[11]));
+    zwp_linux_buffer_params_v1_create(params, int32_t(desc.width), int32_t(desc.height), format, 0);
+    for (int i = 0; i < 3 && !result.done; ++i)
+        if (wl_display_roundtrip(g.display) < 0)
+            break;
+    zwp_linux_buffer_params_v1_destroy(params);
+    AHardwareBuffer_release(hb);
+
+    if (result.accepted)
+        ALOGI("dma-bufs from the allocator: accepted (modifier 0x%llx)", (unsigned long long)modifier);
+    else
+        ALOGI("dma-bufs from the allocator: rejected by the compositor (modifier 0x%llx); using system memory",
+                (unsigned long long)modifier);
+    return result.accepted;
+}
+
 Reader *new_reader(Window *w, int width, int height) {
     auto r = std::make_unique<Reader>();
     r->window = w;
     r->gen = w->next_gen++;
     r->width = width;
     r->height = height;
-    // GPU memory only reaches the compositor as dma-bufs; without them, ask for buffers it can
-    // map through wl_shm.
+    // GPU memory reaches the compositor only as dma-bufs it imports. Readers get it only when the
+    // compositor accepted the probe in run(); otherwise they ask for buffers it can map through wl_shm.
     const uint64_t usage = AHARDWAREBUFFER_USAGE_GPU_SAMPLED_IMAGE |
-            (g.dmabuf ? kUsageGpuMemory : AHARDWAREBUFFER_USAGE_CPU_READ_RARELY);
+            (g.gpu_buffers ? kUsageGpuMemory : AHARDWAREBUFFER_USAGE_CPU_READ_RARELY);
     media_status_t s = AImageReader_newWithUsage(width, height, AIMAGE_FORMAT_RGBA_8888, usage, kImages, &r->reader);
     if (s != AMEDIA_OK) {
         ALOGE("AImageReader_newWithUsage(%dx%d) failed: %d", width, height, s);
@@ -1431,6 +1503,7 @@ void disconnect(const char *control_path) {
     g.placeholder = nullptr;
     g.shm_xbgr = false;
     g.shm_abgr = false;
+    g.gpu_buffers = false;
     g.outputs.clear();
     g.output_names.clear();
     // A new connection may come with other outputs and scales.
@@ -1468,6 +1541,7 @@ int run(const char *runtime_dir, const char *wayland_display, const char *contro
     } else {
         g.placeholder = make_placeholder();
         decor_init(g.compositor, g.subcompositor, g.shm, g.viewporter);
+        g.gpu_buffers = probe_gpu_buffers();
         refresh_changed();
         status = loop(control_path);
     }
