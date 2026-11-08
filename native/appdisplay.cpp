@@ -104,6 +104,7 @@ struct {
     zxdg_decoration_manager_v1 *decorations = nullptr;
     wl_subcompositor *subcompositor = nullptr;
     bool shm_xbgr = false;
+    bool shm_abgr = false;
     wl_buffer *placeholder = nullptr;
 
     std::map<uint32_t, std::unique_ptr<Window>> windows;
@@ -171,6 +172,27 @@ void buffer_release(void *data, wl_buffer *) {
 }
 const wl_buffer_listener buffer_listener = {buffer_release};
 
+// A buffer in system memory whose frames are converted in place before each attach, because
+// wl_shm lacks Android's RGBA byte order. Kept by entry; munmap'd when the entry is freed.
+struct SwappedBuffer {
+    void *map = nullptr;
+    size_t len = 0;
+    uint32_t *pixels = nullptr; // the first pixel
+    int width = 0, height = 0, stride = 0; // stride in pixels
+};
+std::map<const BufEntry *, SwappedBuffer> swapped_buffers;
+
+// Swaps red and blue of every pixel, turning Android's RGBA bytes into ARGB8888's.
+void swap_red_blue(const SwappedBuffer &b) {
+    for (int y = 0; y < b.height; ++y) {
+        uint32_t *row = b.pixels + size_t(y) * b.stride;
+        for (int x = 0; x < b.width; ++x) {
+            uint32_t p = row[x];
+            row[x] = (p & 0xff00ff00u) | ((p & 0xffu) << 16) | ((p >> 16) & 0xffu);
+        }
+    }
+}
+
 wl_buffer *wrap_buffer(AHardwareBuffer *hb, BufEntry *entry) {
     AHardwareBuffer_Desc desc;
     AHardwareBuffer_describe(hb, &desc);
@@ -204,14 +226,47 @@ wl_buffer *wrap_buffer(AHardwareBuffer *hb, BufEntry *entry) {
         return nullptr;
 
     uint32_t format;
+    bool swap = false;
     switch (desc.format) {
     case AHARDWAREBUFFER_FORMAT_R8G8B8A8_UNORM:
-    case AHARDWAREBUFFER_FORMAT_R8G8B8X8_UNORM:
-        format = g.shm_xbgr ? WL_SHM_FORMAT_XBGR8888 : WL_SHM_FORMAT_ABGR8888;
+    case AHARDWAREBUFFER_FORMAT_R8G8B8X8_UNORM: {
+        const bool opaque = desc.format == AHARDWAREBUFFER_FORMAT_R8G8B8X8_UNORM;
+        if (g.shm_xbgr || g.shm_abgr) {
+            format = g.shm_xbgr ? WL_SHM_FORMAT_XBGR8888 : WL_SHM_FORMAT_ABGR8888;
+        } else {
+            // The compositor lacks the RGBA byte order: send the same bytes with red and blue swapped
+            format = opaque ? WL_SHM_FORMAT_XRGB8888 : WL_SHM_FORMAT_ARGB8888;
+            swap = true;
+        }
         break;
+    }
     default:
         ALOGE("unsupported buffer format %u", desc.format);
         return nullptr;
+    }
+    if (swap) {
+        if (offset % 4 != 0 || size_t(offset) + size_t(desc.stride) * 4 * desc.height > size_t(st.st_size)) {
+            ALOGE("buffer of %lld bytes doesn't hold %ux%u pixels at offset %d", (long long)st.st_size,
+                    desc.width, desc.height, offset);
+            return nullptr;
+        }
+        void *map = mmap(nullptr, size_t(st.st_size), PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+        if (map == MAP_FAILED) {
+            ALOGE("mmap of a %lld-byte buffer failed: %s", (long long)st.st_size, strerror(errno));
+            return nullptr;
+        }
+        SwappedBuffer &sb = swapped_buffers[entry];
+        sb.map = map;
+        sb.len = size_t(st.st_size);
+        sb.pixels = reinterpret_cast<uint32_t *>(static_cast<uint8_t *>(map) + offset);
+        sb.width = int(desc.width);
+        sb.height = int(desc.height);
+        sb.stride = int(desc.stride);
+        static bool logged = false;
+        if (!logged) {
+            logged = true;
+            ALOGI("the compositor lacks ABGR8888 in wl_shm; converting frames to ARGB8888 or XRGB8888");
+        }
     }
     wl_shm_pool *pool = wl_shm_create_pool(g.shm, fd, int32_t(st.st_size));
     wl_buffer *b = wl_shm_pool_create_buffer(pool, offset, desc.width, desc.height, desc.stride * 4, format);
@@ -263,6 +318,10 @@ void free_reader(Window *w, Reader *r) {
             wl_buffer_destroy(e->wl);
         if (e->held)
             AImage_delete(e->held);
+        if (auto it = swapped_buffers.find(e.get()); it != swapped_buffers.end()) {
+            munmap(it->second.map, it->second.len);
+            swapped_buffers.erase(it);
+        }
     }
     r->bufs.clear();
     if (w->pending_image && w->pending_gen == r->gen) {
@@ -379,6 +438,8 @@ void present(Window *w, Reader *r, AImage *image) {
     if (e->held)
         AImage_delete(e->held);
     e->held = image;
+    if (auto it = swapped_buffers.find(e); it != swapped_buffers.end())
+        swap_red_blue(it->second); // each frame is new content, so each one is converted
 
     wl_surface_attach(w->surface, e->wl, 0, 0);
     wl_surface_damage_buffer(w->surface, 0, 0, INT32_MAX, INT32_MAX);
@@ -1136,6 +1197,8 @@ int open_control(const char *path) {
 void shm_format(void *, wl_shm *, uint32_t format) {
     if (format == WL_SHM_FORMAT_XBGR8888)
         g.shm_xbgr = true;
+    else if (format == WL_SHM_FORMAT_ABGR8888)
+        g.shm_abgr = true;
 }
 const wl_shm_listener shm_listener = {shm_format};
 
@@ -1367,6 +1430,7 @@ void disconnect(const char *control_path) {
     g.subcompositor = nullptr;
     g.placeholder = nullptr;
     g.shm_xbgr = false;
+    g.shm_abgr = false;
     g.outputs.clear();
     g.output_names.clear();
     // A new connection may come with other outputs and scales.
