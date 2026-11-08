@@ -9,6 +9,8 @@
 #include <fcntl.h>
 #include <gbm.h>
 #include <getopt.h>
+#include <glob.h>
+#include <limits.h>
 #include <signal.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -178,10 +180,31 @@ serve(int fd)
       close(buf);
 }
 
+/* The render node of the NVIDIA GPU, which Venus renders on.  Render node
+ * numbers follow the probe order, which changes with a laptop's MUX mode. */
+static const char *
+nvidia_render_node(void)
+{
+   static char node[64] = "/dev/dri/renderD128";
+   glob_t g;
+   if (glob("/sys/class/drm/renderD*", 0, NULL, &g) != 0)
+      return node;
+   for (size_t i = 0; i < g.gl_pathc; i++) {
+      char link[PATH_MAX], driver[PATH_MAX];
+      snprintf(link, sizeof(link), "%s/device/driver", g.gl_pathv[i]);
+      if (!realpath(link, driver) || strcmp(strrchr(driver, '/') + 1, "nvidia") != 0)
+         continue;
+      snprintf(node, sizeof(node), "/dev/dri/%s", strrchr(g.gl_pathv[i], '/') + 1);
+      break;
+   }
+   globfree(&g);
+   return node;
+}
+
 int
 main(int argc, char **argv)
 {
-   const char *path = NULL, *device = "/dev/dri/renderD128";
+   const char *path = NULL, *device = NULL;
    static const struct option options[] = {
       { "socket-path", required_argument, NULL, 's' },
       { "allowed-uid", required_argument, NULL, 'u' },
@@ -211,6 +234,8 @@ main(int argc, char **argv)
    }
    signal(SIGPIPE, SIG_IGN);
 
+   if (!device)
+      device = nvidia_render_node();
    int dri = open(device, O_RDWR | O_CLOEXEC);
    gbm = dri >= 0 ? gbm_create_device(dri) : NULL;
    if (!gbm) {
