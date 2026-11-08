@@ -110,6 +110,23 @@ These Android properties are not in `waydroid.cfg`, and their defaults are alrea
 
 To change one of them, run `waydroid prop set PROPERTY VALUE` as the user that runs the session, then restart Android.
 
+## Choose the GPU
+
+`waydroid-venus/install.sh` adds a step that runs before each Waydroid container start and picks the GPU that Android renders with. To change it, set `gpu` in the `[waydroid]` section of `/var/lib/waydroid/waydroid.cfg`:
+
+| Value | GPU |
+| --- | --- |
+| `auto` (default) | An Intel or AMD GPU when there is one, as stock Waydroid does. Venus on the NVIDIA GPU when NVIDIA is the only GPU, for example on a laptop with its MUX set to the dedicated GPU. |
+| `nvidia` | Venus on the NVIDIA GPU, even when an Intel or AMD GPU is present. |
+
+The step sets `drm_device` to the render node of that boot, because the render node numbers change with a laptop's MUX mode. It also adds or removes the Venus properties to match. A change applies at the next container start:
+
+```sh
+sudo systemctl restart waydroid-container
+```
+
+With an Intel or AMD GPU, Android uses Waydroid's GBM gralloc. Per-app windows need the Venus gralloc, so `waydroid app launch` opens Waydroid's own windows instead, and the host video decoder isn't used.
+
 ## Optional: play hi-res audio at its own sample rate
 
 The audio HAL opens each stream at the rate the app asks for, up to 192 kHz. PipeWire still resamples everything to 48 kHz unless you allow other rates. To let PipeWire follow the stream's rate, create `~/.config/pipewire/pipewire.conf.d/10-allowed-rates.conf`:
