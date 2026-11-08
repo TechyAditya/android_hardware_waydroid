@@ -127,6 +127,8 @@ sudo systemctl restart waydroid-container
 
 With an Intel or AMD GPU, Android uses Waydroid's GBM gralloc. Per-app windows need the Venus gralloc, so `waydroid app launch` opens Waydroid's own windows instead, and the host video decoder isn't used.
 
+With `gpu = nvidia` while the desktop runs on another GPU, per-app windows send their frames in GPU memory only if the compositor can import them. KWin and Hyprland copy them between GPUs themselves. GNOME's Mutter can't read the NVIDIA GPU's memory layout, so on GNOME the per-app windows use system memory instead.
+
 ## Optional: play hi-res audio at its own sample rate
 
 The audio HAL opens each stream at the rate the app asks for, up to 192 kHz. PipeWire still resamples everything to 48 kHz unless you allow other rates. To let PipeWire follow the stream's rate, create `~/.config/pipewire/pipewire.conf.d/10-allowed-rates.conf`:
