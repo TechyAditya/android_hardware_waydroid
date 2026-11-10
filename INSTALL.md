@@ -311,7 +311,8 @@ Each fix also has its own branch on `TechyAditya/android_hardware_waydroid`, for
 
 | Fix | Branch |
 | --- | --- |
-| Several app windows: single-window size, lifetime, and focus, closing the full UI, and per-monitor refresh rates | `pr/multi-window` |
+| Several app windows: single-window size, lifetime, and focus, and closing the full UI | `pr/multi-window` ([waydroid/android_hardware_waydroid#93](https://github.com/waydroid/android_hardware_waydroid/pull/93)) |
+| A display config per monitor refresh rate, and Android following the monitor a window is on | `pr/refresh-rates` ([waydroid/android_hardware_waydroid#95](https://github.com/waydroid/android_hardware_waydroid/pull/95)), with `TechyAditya/android_device_waydroid_waydroid` `task-hal-1.1` ([#18](https://github.com/waydroid/android_device_waydroid_waydroid/pull/18)) |
 | HDR video on HDR outputs | `pr/hdr-output` |
 | Present gralloc buffers in GPU memory as dma-bufs | `pr/gpu-memory-dmabuf` |
 | Rate-limited resize hotplugs and cursor scale | `resize-interval` ([waydroid/android_hardware_waydroid#92](https://github.com/waydroid/android_hardware_waydroid/pull/92)) |
