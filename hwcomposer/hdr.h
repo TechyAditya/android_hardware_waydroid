@@ -24,6 +24,7 @@
 
 struct display;
 struct window;
+struct wl_output;
 struct wl_registry;
 struct waydroid_hwc_composer_device_1;
 
@@ -36,12 +37,19 @@ struct hdr_capabilities {
 };
 
 void hdr_bind_color_manager(struct display *display, struct wl_registry *registry, uint32_t id, uint32_t version);
-// Reads the output's image description; call before the Wayland thread starts
+void hdr_output_added(struct display *display, uint32_t name, struct wl_output *output);
+void hdr_output_removed(struct display *display, uint32_t name);
+// Reads the outputs' image descriptions; call before the Wayland thread starts
 void hdr_init(struct display *display);
+// Handles the outputs' image description events; only the Wayland thread calls this
+void hdr_dispatch_outputs(struct display *display);
+void hdr_destroy_display(struct display *display);
 hdr_capabilities hdr_get_capabilities(struct display *display);
 
-// Whether the layer is a 10-bit YUV video layer that the HDR path draws itself
+// Whether the layer is a 10-bit YUV video layer
 bool hdr_is_video_layer(waydroid_hwc_composer_device_1 *pdev, const hwc_layer_1 &layer, size_t index);
+// Whether the HDR path draws the layer itself: BT.2020 PQ or HLG video of a type Android was told about
+bool hdr_takes_layer(waydroid_hwc_composer_device_1 *pdev, const hwc_layer_1 &layer, size_t index);
 // Draws the layer on the window's HDR subsurface, below every other layer of the window
 int hdr_apply_layer_to_window(waydroid_hwc_composer_device_1 *pdev, hwc_layer_1 *layer, size_t index, struct window *window);
 // Clears the HDR subsurface of a window that had no HDR layer this frame

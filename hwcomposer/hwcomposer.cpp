@@ -30,6 +30,7 @@
 #include <algorithm>
 #include <string>
 #include <sstream>
+#include <algorithm>
 #include <functional>
 
 #include <log/log.h>
@@ -129,12 +130,11 @@ namespace {
 
         if (buf->isShm) {
             // The copy reads the layer, so it waits for the GPU to finish drawing it.
-            // The wait before the commit comes too late for this. A layer that isn't
-            // ready is skipped, and the compositor keeps showing the previous frame.
-            if (layer->acquireFenceFd != -1 && sync_wait(layer->acquireFenceFd, 100) < 0) {
-                ALOGE("layer not ready after 100 ms; skipping it this frame");
-                return nullptr;
-            }
+            // The wait before the commit comes too late for this. Skipping a late layer
+            // would leave its subsurface slot to the next layer and lose the frame, so
+            // only a fence that never signals ends the wait.
+            if (layer->acquireFenceFd != -1 && sync_wait(layer->acquireFenceFd, 1000) < 0)
+                ALOGE("layer not ready after 1000 ms; copying it anyway");
             gralloc_handler.update_shm_buffer(pdev->display, buf);
         }
         return buf;
@@ -207,18 +207,18 @@ static int hwc_prepare(hwc_composer_device_1_t* dev,
 
     pdev->selected_mode = select_mode(pdev, contents);
 
-    std::vector<int> tasks;
-    for (size_t i = 0; i < contents->numHwLayers; i++) {
-        if (contents->hwLayers[i].compositionType == HWC_FRAMEBUFFER_TARGET)
-            continue;
-        const std::string &name = pdev->display->layer_names[i];
-        int task = name.compare(0, 4, "TID:") == 0 ? parse_task_id(name.substr(4, name.find('#') - 4)) : 0;
-        if (task > 0 && std::find(tasks.begin(), tasks.end(), task) == tasks.end())
-            tasks.push_back(task);
-    }
-    {
+    // Every task the full UI showed since its window opened, also one left behind Home
+    if (property_get_string("waydroid.active_apps", "none") == "Waydroid") {
         std::scoped_lock lock(pdev->display->primary_tasks_mutex);
-        pdev->display->primary_tasks = std::move(tasks);
+        auto &tasks = pdev->display->primary_tasks;
+        for (size_t i = 0; i < contents->numHwLayers; i++) {
+            if (contents->hwLayers[i].compositionType == HWC_FRAMEBUFFER_TARGET)
+                continue;
+            const std::string &name = pdev->display->layer_names[i];
+            int task = name.compare(0, 4, "TID:") == 0 ? parse_task_id(name.substr(4, name.find('#') - 4)) : 0;
+            if (task > 0 && std::find(tasks.begin(), tasks.end(), task) == tasks.end())
+                tasks.push_back(task);
+        }
     }
 
     if (pdev->selected_mode->setup_prepare(pdev, contents) != 0) {
@@ -252,6 +252,10 @@ static long time_to_sleep_to_next_vsync(struct timespec *rt, uint64_t last_vsync
     return next_vsync - now;
 }
 
+static int32_t vsync_period_ns(int32_t refresh) {
+    return int32_t(1000000000000LL / refresh);
+}
+
 static void* hwc_vsync_thread(void* data) {
     auto *pdev = static_cast<waydroid_hwc_composer_device_1 *>(data);
     setpriority(PRIO_PROCESS, 0, HAL_PRIORITY_URGENT_DISPLAY);
@@ -265,7 +269,7 @@ static void* hwc_vsync_thread(void* data) {
 
     struct timespec wait_time;
     wait_time.tv_sec = 0;
-    wait_time.tv_nsec = time_to_sleep_to_next_vsync(&rt, pdev->last_vsync_ns, refresh_vsync_period_ns(pdev->display));
+    wait_time.tv_nsec = time_to_sleep_to_next_vsync(&rt, pdev->last_vsync_ns, vsync_period_ns(pdev->display->refresh));
 
     while (true) {
         ATRACE_BEGIN("hwc_vsync_thread");
@@ -286,7 +290,7 @@ static void* hwc_vsync_thread(void* data) {
                   __FILE__, __LINE__, strerror(errno));
         }
 
-        wait_time.tv_nsec = time_to_sleep_to_next_vsync(&rt, pdev->last_vsync_ns, refresh_vsync_period_ns(pdev->display));
+        wait_time.tv_nsec = time_to_sleep_to_next_vsync(&rt, pdev->last_vsync_ns, vsync_period_ns(pdev->display->refresh));
 
         if (!vsync_enabled || !pdev->procs || !pdev->procs->vsync) {
             ATRACE_END();
@@ -461,24 +465,24 @@ static void update_content_scale(struct display *display, const hwc_display_cont
     if (display->resize_interval_ms <= 0)
         return;
 
-    double scale_x = display->scale;
-    double scale_y = display->scale;
+    std::scoped_lock lock(display->content_scale_mutex);
     const int window_width = display->window_pixel_width;
     const int window_height = display->window_pixel_height;
-    if (display->viewporter && window_width > 0 && window_height > 0) {
-        for (size_t l = 0; l < contents->numHwLayers; l++) {
-            const auto &frame = contents->hwLayers[l].displayFrame;
-            if (contents->hwLayers[l].compositionType == HWC_FRAMEBUFFER_TARGET && frame.right > 0 && frame.bottom > 0) {
-                scale_x = display->scale * frame.right / window_width;
-                scale_y = display->scale * frame.bottom / window_height;
-                break;
-            }
+    display->content_scale_x = display->scale;
+    display->content_scale_y = display->scale;
+    if (!display->viewporter || window_width <= 0 || window_height <= 0)
+        return;
+    for (size_t l = 0; l < contents->numHwLayers; l++) {
+        const auto &frame = contents->hwLayers[l].displayFrame;
+        if (contents->hwLayers[l].compositionType == HWC_FRAMEBUFFER_TARGET && frame.right > 0 && frame.bottom > 0) {
+            // A matching size keeps the exact scale; the ratio is off by a rounding step
+            if (frame.right != window_width)
+                display->content_scale_x = display->scale * frame.right / window_width;
+            if (frame.bottom != window_height)
+                display->content_scale_y = display->scale * frame.bottom / window_height;
+            break;
         }
     }
-
-    std::scoped_lock lock(display->content_scale_mutex);
-    display->content_scale_x = scale_x;
-    display->content_scale_y = scale_y;
 }
 
 static void reset_per_commit_state_window(waydroid_hwc_composer_device_1 *pdev) {
@@ -506,7 +510,9 @@ static int hwc_set(struct hwc_composer_device_1* dev,size_t numDisplays,
 
     std::scoped_lock lock(pdev->display->windowsMutex);
     mode->cleanup_stale_windows(pdev, contents);
-    update_content_scale(pdev->display, contents);
+    // One display-wide factor would stretch every app window by the resized one's ratio
+    if (!pdev->multi_windows)
+        update_content_scale(pdev->display, contents);
 
     reset_per_commit_state_window(pdev);
 
@@ -599,17 +605,18 @@ static void hwc_register_procs(struct hwc_composer_device_1* dev,
     pdev->display->procs = procs;
 }
 
-static int hwc_get_display_configs(struct hwc_composer_device_1* dev __unused,
+static int hwc_get_display_configs(struct hwc_composer_device_1* dev,
                                    int disp, uint32_t* configs, size_t* numConfigs) {
+    auto *pdev = static_cast<waydroid_hwc_composer_device_1 *>(dev);
     if (*numConfigs == 0) {
         return 0;
     }
 
     if (disp == HWC_DISPLAY_PRIMARY) {
-        size_t count = std::min(refresh_config_count(), *numConfigs);
-        for (size_t i = 0; i < count; i++)
-            configs[i] = uint32_t(i);
-        *numConfigs = count;
+        std::scoped_lock lock(pdev->display->refreshMutex);
+        *numConfigs = std::min(*numConfigs, pdev->display->refreshRates.size());
+        for (size_t i = 0; i < *numConfigs; i++)
+            configs[i] = i;
         return 0;
     }
 
@@ -624,8 +631,12 @@ static int32_t hwc_attribute(struct waydroid_hwc_composer_device_1* pdev, uint32
     int density = 180;
 
     switch(attribute) {
-        case HWC_DISPLAY_VSYNC_PERIOD:
-            return refresh_config_period_ns(config);
+        case HWC_DISPLAY_VSYNC_PERIOD: {
+            std::scoped_lock lock(pdev->display->refreshMutex);
+            if (config >= pdev->display->refreshRates.size())
+                return -EINVAL;
+            return vsync_period_ns(pdev->display->refreshRates[config]);
+        }
         case HWC_DISPLAY_WIDTH: {
             if (property_get("persist.waydroid.width_padding", property, nullptr) > 0)
                 width -= atoi(property);
@@ -674,16 +685,20 @@ static int hwc_get_display_attributes(struct hwc_composer_device_1* dev,
 
 static int hwc_get_active_config(struct hwc_composer_device_1* dev, int disp) {
     auto *pdev = static_cast<waydroid_hwc_composer_device_1 *>(dev);
-    if (disp == HWC_DISPLAY_PRIMARY)
-        return refresh_active_config(pdev->display);
-    return -EINVAL;
+    if (disp != HWC_DISPLAY_PRIMARY)
+        return -EINVAL;
+    std::scoped_lock lock(pdev->display->refreshMutex);
+    auto &rates = pdev->display->refreshRates;
+    return std::find(rates.begin(), rates.end(), pdev->display->refresh.load()) - rates.begin();
 }
 
 static int hwc_set_active_config(struct hwc_composer_device_1* dev, int disp, int index) {
     auto *pdev = static_cast<waydroid_hwc_composer_device_1 *>(dev);
-    if (disp == HWC_DISPLAY_PRIMARY && index >= 0 && refresh_set_active_config(pdev->display, size_t(index)))
-        return 0;
-    return -EINVAL;
+    std::scoped_lock lock(pdev->display->refreshMutex);
+    if (disp != HWC_DISPLAY_PRIMARY || index < 0 || size_t(index) >= pdev->display->refreshRates.size())
+        return -EINVAL;
+    pdev->display->refresh = pdev->display->refreshRates[index];
+    return 0;
 }
 
 static int hwc_set_cursor_position_async(struct hwc_composer_device_1 *, int, int, int) {
@@ -852,6 +867,13 @@ static int hwc_open(const struct hw_module_t* module, const char* name,
     }
 
     pdev->vsync_callback_enabled = true;
+    {
+        std::scoped_lock lock(pdev->display->refreshMutex);
+        auto &rates = pdev->display->refreshRates;
+        if (rates.empty())
+            rates.push_back(60000);
+        pdev->display->refresh = *std::max_element(rates.begin(), rates.end());
+    }
 
     struct timespec rt;
     if (clock_gettime(CLOCK_MONOTONIC, &rt) == -1) {
@@ -972,6 +994,8 @@ std::unique_ptr<buffer> wl_cursor_cursor_handler::create_buffer(waydroid_hwc_com
 
 void wl_cursor_cursor_handler::set_cursor(display* display) const {
     assert(display->pointer);
+    if (display->pointer_on_decor)
+        return;
     // Without a viewport the cursor buffer keeps the display scale, so its hotspot does too
     double scale_x = display->scale, scale_y = display->scale;
     if (cursor_surface_context.viewport)
@@ -1001,7 +1025,7 @@ int wl_cursor_cursor_handler::apply_cursor(waydroid_hwc_composer_device_1* pdev,
 }
 
 int wl_cursor_cursor_handler::reset_cursor(waydroid_hwc_composer_device_1* pdev) {
-    if (pdev->display->pointer) {
+    if (pdev->display->pointer && !pdev->display->pointer_on_decor) {
         wl_pointer_set_cursor(pdev->display->pointer, pdev->display->pointer_enter_serial,
                               nullptr,
                               0,

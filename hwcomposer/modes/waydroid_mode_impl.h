@@ -147,11 +147,9 @@ class non_compositing_window_mode : public virtual waydroid_mode {
   public:
     int setup_prepare(waydroid_hwc_composer_device_1 *pdev, hwc_display_contents_1_t *contents) override {
         // SurfaceFlinger only offers HDR layers when HDR is reported, and tone-maps them itself otherwise
-        if (hdr_get_capabilities(pdev->display).types.empty())
-            return 0;
         for (size_t i = 0; i < contents->numHwLayers; ++i) {
             const auto &layer = contents->hwLayers[i];
-            if (hdr_is_video_layer(pdev, layer, i) && can_draw_below_framebuffer(layer)) {
+            if (hdr_takes_layer(pdev, layer, i) && can_draw_below_framebuffer(layer)) {
                 m_hdr_layer_index = i;
                 break;
             }

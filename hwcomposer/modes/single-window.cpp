@@ -55,9 +55,13 @@ bool single_window_mode_base::target_has_focus(waydroid_hwc_composer_device_1 *p
     return now - unfocused.since > kFocusRequestTimeout;
 }
 
-// Android returned to a task that already has a window, without a launch or a focus change from
-// us: the focused app finished or moved its task to the back, so close its window. A switch to a
-// task without a window is the app opening another one, and keeps both windows.
+// Longest time from a Back to Android leaving the app's task
+static constexpr std::chrono::seconds kBackTimeout{2};
+
+// Android returned to a task that already has a window soon after a Back, without a launch or a
+// focus change from us: the focused app finished, so close its window. Without a Back, the app
+// brought another task to the front, as a link to an app with a window does, and a switch to a
+// task without a window is the app opening another one; both keep the windows.
 void single_window_mode_base::close_left_task_window(waydroid_hwc_composer_device_1 *pdev) {
     auto *display = pdev->display;
     // `waydroid app launch` sets waydroid.active_apps before Android switches tasks. The serial
@@ -92,8 +96,10 @@ void single_window_mode_base::close_left_task_window(waydroid_hwc_composer_devic
     const std::string left_tid = display->last_target_tid;
     display->last_target_tid = target_layer_tid;
     display->last_active_apps_serial = active_apps_serial;
+    const std::chrono::steady_clock::time_point last_back{std::chrono::steady_clock::duration{display->last_back.load()}};
+    const bool after_back = std::chrono::steady_clock::now() - last_back < kBackTimeout;
 
-    if (left_tid.empty() || launched || focus_requested
+    if (left_tid.empty() || launched || focus_requested || !after_back
             || display->windows.find(target_layer_tid) == display->windows.end())
         return;
     auto it = display->windows.find(left_tid);

@@ -74,12 +74,26 @@ struct video_description {
     std::atomic<bool> ready = false;
 };
 
+// The image description of one host output. Kept after the output is removed, because its
+// pending requests still deliver events.
+struct output_tracker {
+    hdr_display_state *hdr;
+    uint32_t name;
+    struct wl_output *wl_output;
+    struct wp_color_management_output_v1 *cm = nullptr;
+    // Guarded by hdr->mutex: the description being read, and the last one read
+    struct wp_image_description_v1 *pending = nullptr;
+    output_info reading;
+    output_info current;
+    bool valid = false;
+    bool removed = false;
+};
+
 } // namespace
 
 struct hdr_display_state {
     struct display *display;
     struct wp_color_manager_v1 *manager = nullptr;
-    struct wp_color_management_output_v1 *output = nullptr;
     bool usable = false;
 
     // From wp_color_manager_v1 events
@@ -87,13 +101,18 @@ struct hdr_display_state {
     std::vector<uint32_t> tfs;
     std::vector<uint32_t> primaries;
 
-    // Handlers can run on the Wayland thread and on a thread in wl_display_roundtrip() at once
+    // Output descriptions arrive on their own queue, dispatched only by hdr_init() and then by the
+    // Wayland thread. On the default queue, wl_display_roundtrip() in window::create() could run the
+    // events of one description on two threads at once and out of order.
+    struct wl_event_queue *output_queue = nullptr;
+    // manager, with new objects on output_queue
+    struct wp_color_manager_v1 *output_manager = nullptr;
+
     std::mutex mutex;
-    // Guarded by mutex: the output description being read, and the last one read
-    struct wp_image_description_v1 *pending_output_description = nullptr;
-    output_info reading;
-    output_info current;
-    bool current_valid = false;
+    // Guarded by mutex
+    std::vector<std::unique_ptr<output_tracker>> outputs;
+    // The HDR types Android was last told about through waydroid_hwc_get_hdr_capabilities()
+    std::vector<int32_t> reported_types;
 
     // Keyed by transfer function, BT.2020 primaries. Written before the Wayland thread starts.
     std::map<uint32_t, video_description> video_descriptions;
@@ -166,22 +185,22 @@ const struct wp_color_manager_v1_listener manager_listener = {
 
 template<typename F>
 void update_reading(void *data, F update) {
-    auto *hdr = static_cast<hdr_display_state *>(data);
-    std::scoped_lock lock(hdr->mutex);
-    update(hdr->reading);
+    auto *output = static_cast<output_tracker *>(data);
+    std::scoped_lock lock(output->hdr->mutex);
+    update(output->reading);
 }
 
 void info_done(void *data, struct wp_image_description_info_v1 *info) {
-    auto *hdr = static_cast<hdr_display_state *>(data);
+    auto *output = static_cast<output_tracker *>(data);
     output_info read;
     {
-        std::scoped_lock lock(hdr->mutex);
-        hdr->current = hdr->reading;
-        hdr->current_valid = true;
-        read = hdr->reading;
+        std::scoped_lock lock(output->hdr->mutex);
+        output->current = output->reading;
+        output->valid = !output->removed;
+        read = output->reading;
     }
-    ALOGI("HDR: output tf %u primaries %u, luminance %.4f-%.0f, target %.4f-%.0f, max_cll %.0f max_fall %.0f",
-          read.tf, read.primaries, read.min_luminance, read.max_luminance,
+    ALOGI("HDR: output %u tf %u primaries %u, luminance %.4f-%.0f, target %.4f-%.0f, max_cll %.0f max_fall %.0f",
+          output->name, read.tf, read.primaries, read.min_luminance, read.max_luminance,
           read.target_min_luminance, read.target_max_luminance, read.max_cll, read.max_fall);
     wl_proxy_destroy(reinterpret_cast<struct wl_proxy *>(info));
 }
@@ -233,21 +252,23 @@ const struct wp_image_description_info_v1_listener info_listener = {
 };
 
 void output_description_failed(void *data, struct wp_image_description_v1 *description, uint32_t cause, const char *msg) {
-    auto *hdr = static_cast<hdr_display_state *>(data);
-    ALOGW("HDR: cannot read the output's image description (%u): %s", cause, msg);
-    std::scoped_lock lock(hdr->mutex);
-    if (hdr->pending_output_description == description)
-        hdr->pending_output_description = nullptr;
+    auto *output = static_cast<output_tracker *>(data);
+    ALOGW("HDR: cannot read the image description of output %u (%u): %s", output->name, cause, msg);
+    std::scoped_lock lock(output->hdr->mutex);
+    if (output->pending == description) {
+        output->pending = nullptr;
+        output->valid = false;
+    }
     wp_image_description_v1_destroy(description);
 }
 void output_description_ready(void *data, struct wp_image_description_v1 *description, uint32_t) {
-    auto *hdr = static_cast<hdr_display_state *>(data);
-    std::scoped_lock lock(hdr->mutex);
-    if (hdr->pending_output_description == description) {
-        hdr->pending_output_description = nullptr;
-        hdr->reading = {};
+    auto *output = static_cast<output_tracker *>(data);
+    std::scoped_lock lock(output->hdr->mutex);
+    if (output->pending == description) {
+        output->pending = nullptr;
+        output->reading = {};
         auto *info = wp_image_description_v1_get_information(description);
-        wp_image_description_info_v1_add_listener(info, &info_listener, hdr);
+        wp_image_description_info_v1_add_listener(info, &info_listener, output);
     }
     wp_image_description_v1_destroy(description);
 }
@@ -259,21 +280,39 @@ const struct wp_image_description_v1_listener output_description_listener = {
     output_description_ready2,
 };
 
-void request_output_description(hdr_display_state *hdr) {
-    std::scoped_lock lock(hdr->mutex);
+// The caller holds output->hdr->mutex
+void request_output_description(output_tracker *output) {
     // A superseded request still delivers ready or failed, which destroys it
-    hdr->pending_output_description = wp_color_management_output_v1_get_image_description(hdr->output);
-    wp_image_description_v1_add_listener(hdr->pending_output_description, &output_description_listener, hdr);
+    output->pending = wp_color_management_output_v1_get_image_description(output->cm);
+    wp_image_description_v1_add_listener(output->pending, &output_description_listener, output);
 }
 
 void output_image_description_changed(void *data, struct wp_color_management_output_v1 *) {
+    auto *output = static_cast<output_tracker *>(data);
     // Android reads the capabilities again on the next display hotplug
-    request_output_description(static_cast<hdr_display_state *>(data));
+    std::scoped_lock lock(output->hdr->mutex);
+    if (!output->removed)
+        request_output_description(output);
 }
 
 const struct wp_color_management_output_v1_listener output_listener = {
     output_image_description_changed,
 };
+
+// The caller holds output->hdr->mutex
+void track_output(output_tracker *output) {
+    output->cm = wp_color_manager_v1_get_output(output->hdr->output_manager, output->wl_output);
+    wp_color_management_output_v1_add_listener(output->cm, &output_listener, output);
+    request_output_description(output);
+}
+
+hdr_display_state *display_state(struct display *display) {
+    if (!display->hdr) {
+        display->hdr = new hdr_display_state();
+        display->hdr->display = display;
+    }
+    return display->hdr;
+}
 
 void video_description_failed(void *data, struct wp_image_description_v1 *description, uint32_t cause, const char *msg) {
     ALOGW("HDR: compositor refused a video image description (%u): %s", cause, msg);
@@ -313,8 +352,6 @@ uint32_t dataspace_transfer_function(int32_t dataspace) {
         case HAL_DATASPACE_TRANSFER_HLG:
             return WP_COLOR_MANAGER_V1_TRANSFER_FUNCTION_HLG;
         case HAL_DATASPACE_TRANSFER_ST2084:
-        // 10-bit YUV without a dataspace is HDR10 video in practice
-        case HAL_DATASPACE_TRANSFER_UNSPECIFIED:
             return WP_COLOR_MANAGER_V1_TRANSFER_FUNCTION_ST2084_PQ;
         default:
             return 0;
@@ -332,12 +369,8 @@ struct yuv_coefficients {
 };
 
 yuv_coefficients coefficients_for(int32_t dataspace) {
-    // Kr, Kb of BT.2020, or BT.709 when the dataspace says so
-    float kr = 0.2627f, kb = 0.0593f;
-    if ((dataspace & HAL_DATASPACE_STANDARD_MASK) == HAL_DATASPACE_STANDARD_BT709) {
-        kr = 0.2126f;
-        kb = 0.0722f;
-    }
+    // Kr, Kb of BT.2020, the only standard hdr_takes_layer() accepts
+    const float kr = 0.2627f, kb = 0.0593f;
     const float kg = 1 - kr - kb;
 
     yuv_coefficients c;
@@ -566,18 +599,50 @@ hdr_window_state *window_state(struct window *window) {
 } // namespace
 
 void hdr_bind_color_manager(struct display *display, struct wl_registry *registry, uint32_t id, uint32_t) {
-    auto *hdr = new hdr_display_state();
-    hdr->display = display;
+    auto *hdr = display_state(display);
     hdr->buffer_queue = wl_display_create_queue(display->display);
     hdr->manager = static_cast<struct wp_color_manager_v1 *>(
             wl_registry_bind(registry, id, &wp_color_manager_v1_interface, 1));
     wp_color_manager_v1_add_listener(hdr->manager, &manager_listener, hdr);
-    display->hdr = hdr;
+}
+
+void hdr_output_added(struct display *display, uint32_t name, struct wl_output *wl_output) {
+    auto *hdr = display_state(display);
+    std::scoped_lock lock(hdr->mutex);
+    auto output = std::make_unique<output_tracker>();
+    output->hdr = hdr;
+    output->name = name;
+    output->wl_output = wl_output;
+    // Before hdr_init(), it tracks every output it finds
+    if (hdr->output_manager)
+        track_output(output.get());
+    hdr->outputs.push_back(std::move(output));
+}
+
+void hdr_output_removed(struct display *display, uint32_t name) {
+    auto *hdr = display->hdr;
+    if (!hdr)
+        return;
+    std::scoped_lock lock(hdr->mutex);
+    for (auto &output : hdr->outputs) {
+        if (output->name == name && !output->removed) {
+            output->removed = true;
+            output->valid = false;
+            if (output->cm)
+                wp_color_management_output_v1_destroy(output->cm);
+            output->cm = nullptr;
+        }
+    }
+}
+
+void hdr_dispatch_outputs(struct display *display) {
+    if (display->hdr && display->hdr->output_queue)
+        wl_display_dispatch_queue_pending(display->display, display->hdr->output_queue);
 }
 
 void hdr_init(struct display *display) {
     auto *hdr = display->hdr;
-    if (!hdr || !display->output || !display->shm)
+    if (!hdr || !hdr->manager || !display->shm)
         return;
     if (property_get_bool("persist.waydroid.no_hdr", false))
         return;
@@ -598,17 +663,24 @@ void hdr_init(struct display *display) {
         return;
     }
 
-    hdr->output = wp_color_manager_v1_get_output(hdr->manager, display->output);
-    wp_color_management_output_v1_add_listener(hdr->output, &output_listener, hdr);
-    request_output_description(hdr);
+    hdr->output_queue = wl_display_create_queue(display->display);
+    hdr->output_manager = static_cast<struct wp_color_manager_v1 *>(wl_proxy_create_wrapper(hdr->manager));
+    wl_proxy_set_queue(reinterpret_cast<struct wl_proxy *>(hdr->output_manager), hdr->output_queue);
+    {
+        std::scoped_lock lock(hdr->mutex);
+        for (auto &output : hdr->outputs)
+            if (!output->removed)
+                track_output(output.get());
+    }
     create_video_description(hdr, WP_COLOR_MANAGER_V1_TRANSFER_FUNCTION_ST2084_PQ);
     create_video_description(hdr, WP_COLOR_MANAGER_V1_TRANSFER_FUNCTION_HLG);
+    wl_display_roundtrip(display->display);
 
-    // The output description takes two round trips: the description, then its information
+    // An output description takes two round trips: the description, then its information
     for (int i = 0; i < 4; i++) {
-        wl_display_roundtrip(display->display);
+        wl_display_roundtrip_queue(display->display, hdr->output_queue);
         std::scoped_lock lock(hdr->mutex);
-        if (hdr->current_valid)
+        if (std::none_of(hdr->outputs.begin(), hdr->outputs.end(), [](const auto &o) { return o->pending; }))
             break;
     }
 }
@@ -619,15 +691,22 @@ hdr_capabilities hdr_get_capabilities(struct display *display) {
     if (!hdr || !hdr->usable)
         return caps;
 
+    // Android has one display for every monitor, and the compositor maps tagged video to an SDR
+    // monitor, so HDR is reported while any monitor is in HDR mode, with the brightest one's range
+    bool found = false;
     output_info info;
     {
         std::scoped_lock lock(hdr->mutex);
-        if (!hdr->current_valid)
-            return caps;
-        info = hdr->current;
+        for (const auto &output : hdr->outputs) {
+            const auto &o = output->current;
+            if (!output->valid || (o.tf != WP_COLOR_MANAGER_V1_TRANSFER_FUNCTION_ST2084_PQ && o.tf != WP_COLOR_MANAGER_V1_TRANSFER_FUNCTION_HLG))
+                continue;
+            if (!found || o.max_luminance > info.max_luminance)
+                info = o;
+            found = true;
+        }
     }
-    // Only an output in HDR mode shows more than SDR
-    if (info.tf != WP_COLOR_MANAGER_V1_TRANSFER_FUNCTION_ST2084_PQ && info.tf != WP_COLOR_MANAGER_V1_TRANSFER_FUNCTION_HLG)
+    if (!found)
         return caps;
 
     if (ready_video_description(hdr, WP_COLOR_MANAGER_V1_TRANSFER_FUNCTION_ST2084_PQ))
@@ -640,6 +719,30 @@ hdr_capabilities hdr_get_capabilities(struct display *display) {
     caps.max_average_luminance = info.max_fall > 0 ? std::min(info.max_fall, caps.max_luminance) : caps.max_luminance;
     caps.min_luminance = info.target_max_luminance > 0 ? info.target_min_luminance : info.min_luminance;
     return caps;
+}
+
+bool hdr_takes_layer(waydroid_hwc_composer_device_1 *pdev, const hwc_layer_1 &layer, size_t index) {
+    auto *hdr = pdev->display->hdr;
+    if (!hdr || !hdr->usable || !hdr_is_video_layer(pdev, layer, index))
+        return false;
+    // Only the dataspaces the image descriptions match. Without the HWC2 adapter's patch, Android
+    // sends no dataspaces and was told about no HDR type.
+    const int32_t dataspace = layer_dataspace(pdev, index);
+    if ((dataspace & HAL_DATASPACE_STANDARD_MASK) != HAL_DATASPACE_STANDARD_BT2020)
+        return false;
+    int32_t type;
+    switch (dataspace & HAL_DATASPACE_TRANSFER_MASK) {
+        case HAL_DATASPACE_TRANSFER_ST2084:
+            type = HAL_HDR_HDR10;
+            break;
+        case HAL_DATASPACE_TRANSFER_HLG:
+            type = HAL_HDR_HLG;
+            break;
+        default:
+            return false;
+    }
+    std::scoped_lock lock(hdr->mutex);
+    return std::find(hdr->reported_types.begin(), hdr->reported_types.end(), type) != hdr->reported_types.end();
 }
 
 bool hdr_is_video_layer(waydroid_hwc_composer_device_1 *pdev, const hwc_layer_1 &layer, size_t index) {
@@ -660,6 +763,12 @@ int hdr_apply_layer_to_window(waydroid_hwc_composer_device_1 *pdev, hwc_layer_1 
     const int32_t dataspace = layer_dataspace(pdev, index);
     const uint32_t tf = dataspace_transfer_function(dataspace);
     const frame_source source {layer->handle, dataspace, layer->sourceCropf, layer->displayFrame};
+    // SurfaceFlinger already cleared the layer's area in the client target, so a frame that fails
+    // keeps the one on screen
+    auto keep_shown = [&] {
+        state->used = state->attached;
+        res = state->attached ? 0 : -1;
+    };
 
     layer->releaseFenceFd = -1;
     if (!display->hdr || !display->hdr->usable)
@@ -684,8 +793,10 @@ int hdr_apply_layer_to_window(waydroid_hwc_composer_device_1 *pdev, hwc_layer_1 
         const int frame_height = layer->displayFrame.bottom - layer->displayFrame.top;
         const float crop_width = cv.crop.right - cv.crop.left;
         const float crop_height = cv.crop.bottom - cv.crop.top;
-        if (frame_width <= 0 || frame_height <= 0 || crop_width < 1 || crop_height < 1 || cv.src_width <= 0 || cv.src_height <= 0)
+        if (frame_width <= 0 || frame_height <= 0 || crop_width < 1 || crop_height < 1 || cv.src_width <= 0 || cv.src_height <= 0) {
+            keep_shown();
             goto out;
+        }
         // Never upscale here: the compositor scales from the viewport
         cv.out_width = std::min(frame_width, static_cast<int>(ceil(crop_width)));
         cv.out_height = std::min(frame_height, static_cast<int>(ceil(crop_height)));
@@ -694,16 +805,15 @@ int hdr_apply_layer_to_window(waydroid_hwc_composer_device_1 *pdev, hwc_layer_1 
     if (layer->acquireFenceFd != -1) {
         if (sync_wait(layer->acquireFenceFd, acquireTimeoutMS) < 0) {
             ALOGE("HDR: video buffer not ready after %d ms", acquireTimeoutMS);
+            keep_shown();
             goto out;
         }
     }
 
     frame = next_frame_buffer(display, state, cv.out_width, cv.out_height);
     if (!frame) {
-        // The compositor holds every buffer, or none could be allocated: drop this frame and
-        // keep the one on screen
-        state->used = state->attached;
-        res = state->attached ? 0 : -1;
+        // The compositor holds every buffer, or none could be allocated
+        keep_shown();
         goto out;
     }
 
@@ -711,6 +821,7 @@ int hdr_apply_layer_to_window(waydroid_hwc_composer_device_1 *pdev, hwc_layer_1 
         android::Rect bounds(cv.src_width, cv.src_height);
         if (android::GraphicBufferMapper::get().lockYCbCr(layer->handle, GRALLOC_USAGE_SW_READ_OFTEN, bounds, &cv.src) != 0) {
             ALOGE("HDR: cannot lock the video buffer");
+            keep_shown();
             goto out;
         }
         cv.dst = static_cast<uint32_t *>(frame->buf->shm_data);
@@ -733,11 +844,14 @@ int hdr_apply_layer_to_window(waydroid_hwc_composer_device_1 *pdev, hwc_layer_1 
     state->shown = source;
     wl_surface_damage(state->layer.surface, 0, 0, INT32_MAX, INT32_MAX);
     state->layer.set_crop({0, 0, static_cast<float>(cv.out_width), static_cast<float>(cv.out_height)});
-    double scale_x, scale_y;
-    effective_scale(display, &scale_x, &scale_y);
-    state->layer.set_display_frame(layer->displayFrame, scale_x, scale_y);
-    state->layer.set_position(floor(layer->displayFrame.left / scale_x),
-                              floor(layer->displayFrame.top / scale_y));
+    {
+        // The same scale as the other layers, which stretch while a resize is pending
+        double scale_x, scale_y;
+        effective_scale(display, &scale_x, &scale_y);
+        state->layer.set_display_frame(layer->displayFrame, scale_x, scale_y);
+        state->layer.set_position(floor(layer->displayFrame.left / scale_x),
+                                  floor(layer->displayFrame.top / scale_y));
+    }
     wl_surface_commit(state->layer.surface);
 
     display->layers[state->layer.surface] = {
@@ -779,13 +893,42 @@ void hdr_destroy_window(struct window *window) {
     window->hdr = nullptr;
 }
 
+void hdr_destroy_display(struct display *display) {
+    auto *hdr = display->hdr;
+    if (!hdr)
+        return;
+    for (auto &output : hdr->outputs) {
+        if (output->pending)
+            wp_image_description_v1_destroy(output->pending);
+        if (output->cm)
+            wp_color_management_output_v1_destroy(output->cm);
+    }
+    for (auto &[tf, video] : hdr->video_descriptions)
+        if (video.description)
+            wp_image_description_v1_destroy(video.description);
+    if (hdr->output_manager)
+        wl_proxy_wrapper_destroy(hdr->output_manager);
+    if (hdr->manager)
+        wp_color_manager_v1_destroy(hdr->manager);
+    if (hdr->output_queue)
+        wl_event_queue_destroy(hdr->output_queue);
+    // buffer_queue stays: the windows' video buffers are destroyed with the windows, later
+    delete hdr;
+    display->hdr = nullptr;
+}
+
 extern "C" __attribute__((visibility("default")))
 int waydroid_hwc_get_hdr_capabilities(struct hwc_composer_device_1 *dev, int disp, uint32_t *num_types,
         int32_t *types, float *max_luminance, float *max_average_luminance, float *min_luminance) {
     auto *pdev = static_cast<waydroid_hwc_composer_device_1 *>(dev);
     hdr_capabilities caps;
-    if (disp == HWC_DISPLAY_PRIMARY)
+    // Subsurface compositing and multi-window mode leave 10-bit video to SurfaceFlinger
+    if (disp == HWC_DISPLAY_PRIMARY && !pdev->should_compose)
         caps = hdr_get_capabilities(pdev->display);
+    if (disp == HWC_DISPLAY_PRIMARY && pdev->display->hdr) {
+        std::scoped_lock lock(pdev->display->hdr->mutex);
+        pdev->display->hdr->reported_types = caps.types;
+    }
 
     if (types) {
         *num_types = std::min<uint32_t>(*num_types, caps.types.size());

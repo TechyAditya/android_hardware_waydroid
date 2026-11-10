@@ -42,14 +42,17 @@
 #include <fcntl.h>
 #include <getopt.h>
 #include <errno.h>
+#include <atomic>
 #include <map>
 #include <list>
+#include <mutex>
 #include <set>
+#include <vector>
 #include <pthread.h>
 #include <semaphore.h>
 #include <hardware/hwcomposer.h>
 #include <cutils/properties.h>
-#include <vendor/waydroid/task/1.0/IWaydroidTask.h>
+#include <vendor/waydroid/task/1.1/IWaydroidTask.h>
 #include <wayland-util.h>
 #include <wayland-client.h>
 
@@ -171,6 +174,8 @@ struct surface_context {
     void set_display_frame(hwc_rect_t rect, double scale_x, double scale_y);
 };
 
+struct decor;
+
 struct window {
     struct layer : public surface_context {
         struct wl_subsurface *subsurface;
@@ -193,6 +198,10 @@ struct window {
     struct wl_shell_surface *shell_surface;
     struct xdg_surface *xdg_surface;
     struct xdg_toplevel *xdg_toplevel;
+    struct zxdg_toplevel_decoration_v1 *decoration;
+    // The title bar the window draws itself, where the compositor draws none
+    struct decor *decor;
+    std::string title;
 
     /* Used for the background color */
     bool dedicated_background_surface;
@@ -213,6 +222,11 @@ struct window {
     std::string taskID;
 
     std::atomic<bool> configured;
+    // From the last xdg_toplevel.configure; they apply at the xdg_surface.configure after it.
+    // The size is the last one the compositor gave, title bar included.
+    int configured_width;
+    int configured_height;
+    bool configured_activated;
 
     // Reset every hwc_set cycle
     struct wl_region* input_region;
@@ -235,6 +249,36 @@ struct window {
   private:
     window() = default;
 };
+
+// decor.cpp: a title bar with Back and window controls, and resize edges, for windows outside
+// multi-window mode where the compositor draws no title bar. The caller holds liveWindowsMutex,
+// except for the input functions, which take it and return whether the event was a title bar's.
+void decor_create(struct window *window, bool client_side);
+void decor_destroy(struct window *window);
+void decor_set_client_side(struct window *window, bool client_side);
+void decor_states(struct window *window, struct wl_array *states);
+int decor_title_height(const struct window *window);
+// Sets the window geometry for content of width x height, with the title bar above it
+void decor_set_size(struct window *window, int width, int height);
+// Applies new states or a new decoration mode at the current size
+void decor_place(struct window *window);
+bool decor_pointer_enter(struct wl_surface *surface, uint32_t serial, double x, double y);
+bool decor_pointer_motion(double x, double y);
+bool decor_pointer_leave();
+bool decor_pointer_button(uint32_t serial, uint32_t button, bool pressed);
+bool decor_touch_down(struct wl_surface *surface, uint32_t serial, int32_t id, double x, double y);
+bool decor_touch_up(int32_t id);
+// For wl_touch.cancel and a removed touch device
+void decor_touch_cancel();
+bool decor_owns_surface(struct wl_surface *surface);
+
+// For decor.cpp
+std::unique_lock<std::mutex> lock_live_windows();
+// Requires liveWindowsMutex
+struct window *find_live_window(uintptr_t id);
+// Without liveWindowsMutex: closes the window as the compositor's close request does
+void close_window(uintptr_t id);
+void send_back(struct display *display);
 
 class open_windows {
     using Collection = std::map<std::string, std::unique_ptr<window>>;
@@ -325,6 +369,12 @@ struct display {
     struct android_wlegl *android_wlegl;
     struct zwp_linux_dmabuf_v1 *dmabuf;
     struct xdg_wm_base *wm_base;
+    struct zxdg_decoration_manager_v1 *decoration_manager;
+    // Theme cursors over the title bars and resize borders a window draws itself
+    struct wp_cursor_shape_manager_v1 *cursor_shape_manager;
+    struct wp_cursor_shape_device_v1 *cursor_shape_device;
+    // The pointer is on such a title bar or border, which sets its own cursor
+    std::atomic<bool> pointer_on_decor;
     struct zwp_tablet_manager_v2* tablet_manager;
     struct zwp_tablet_seat_v2 *tablet_seat;
     struct zwp_pointer_constraints_v1 *pointer_constraints;
@@ -379,14 +429,21 @@ struct display {
     int full_height;
     int req_width;
     int req_height;
-    // Refresh rate Android runs at, in mHz; see refresh.cpp
-    std::atomic<int> refresh;
+    // The monitors' refresh rates in mHz, one display config each, the index being the config.
+    // The list only grows, so a switch between known rates is a mode change, not a hotplug.
+    std::mutex refreshMutex;
+    std::vector<int32_t> refreshRates;
+    std::atomic<int32_t> refresh; // the active config's rate
+    // Each monitor's current rate and the monitors each window is on, for setRefreshRate()
+    std::map<struct wl_output *, int32_t> outputRefresh;
+    std::map<struct wl_surface *, std::set<struct wl_output *>> surfaceOutputs;
+    int32_t followedRefresh;
 
     std::unordered_set<uint32_t> formats;
 
     std::map<uint32_t, std::vector<uint64_t>> modifiers;
     std::map<uint32_t, std::string> layer_names;
-    // Tasks with a layer in the primary display's latest frame. Tasks on other
+    // Tasks that had a layer in the full UI since its window opened. Tasks on other
     // displays, such as per-app virtual displays, never appear here.
     std::mutex primary_tasks_mutex;
     std::vector<int> primary_tasks;
@@ -401,10 +458,27 @@ struct display {
 
     bool isMaximized;
     sp<IWaydroidTask> task;
+    sp<::vendor::waydroid::task::V1_1::IWaydroidTask> task1_1;
 
     const hwc_procs_t *procs;
     bool needHotplug;
 
+    // persist.waydroid.resize_interval_ms: minimum time between resize hotplugs, 150 by default; 0 disables
+    int resize_interval_ms;
+    int hotplug_timer_fd;
+    std::mutex hotplug_mutex;
+    bool hotplug_pending;
+    std::chrono::steady_clock::time_point last_hotplug;
+    // The size Android was last given
+    int hotplug_width;
+    int hotplug_height;
+
+    // Android pixels per surface unit while the last frame is stretched over a resized window
+    std::mutex content_scale_mutex;
+    double content_scale_x;
+    double content_scale_y;
+    int window_pixel_width;
+    int window_pixel_height;
     // In single-window mode every window shares one Android display, sized from the focused window
     std::atomic<bool> multi_windows;
     std::atomic<struct window *> size_window;
@@ -421,20 +495,8 @@ struct display {
     // The task and waydroid.active_apps of the last frame
     std::string last_target_tid;
     uint32_t last_active_apps_serial;
-
-    // persist.waydroid.resize_interval_ms: minimum time between resize hotplugs, 150 by default; 0 disables
-    int resize_interval_ms;
-    int hotplug_timer_fd;
-    std::mutex hotplug_mutex;
-    bool hotplug_pending;
-    std::chrono::steady_clock::time_point last_hotplug;
-
-    // Android pixels per surface unit while the last frame is stretched over a resized window
-    std::mutex content_scale_mutex;
-    double content_scale_x;
-    double content_scale_y;
-    std::atomic<int> window_pixel_width;
-    std::atomic<int> window_pixel_height;
+    // When the user last pressed a key or button that Android takes as Back
+    std::atomic<std::chrono::steady_clock::rep> last_back;
 };
 
 void
@@ -446,28 +508,6 @@ handle_relative_motion(void *data, struct zwp_relative_pointer_v1*,
 
 void
 snapshot_inactive_app_window(struct display *display, struct window *window);
-
-// Display configs, one per refresh rate of the host's monitors (refresh.cpp)
-void
-refresh_add_output(struct display *display, uint32_t name, struct wl_output *output);
-void
-refresh_output_mode(struct display *display, struct wl_output *output, int32_t refresh);
-void
-refresh_output_done(struct display *display, struct wl_output *output);
-void
-refresh_remove_global(struct display *display, uint32_t name);
-void
-refresh_start(struct display *display);
-size_t
-refresh_config_count();
-int32_t
-refresh_config_period_ns(size_t config);
-int
-refresh_active_config(const struct display *display);
-bool
-refresh_set_active_config(struct display *display, size_t config);
-int32_t
-refresh_vsync_period_ns(const struct display *display);
 
 struct display *
 create_display(const char* gralloc);

@@ -34,6 +34,7 @@ cc_library_shared {
         "vendor.waydroid.display@1.1",
         "vendor.waydroid.display@1.2",
         "vendor.waydroid.task@1.0",
+        "vendor.waydroid.task@1.1",
         "vendor.waydroid.window@1.0",
         "vendor.waydroid.window@1.1",
         "vendor.waydroid.window@1.2",
@@ -43,12 +44,13 @@ cc_library_shared {
         "libffi",
         "libwayland_extension_client_protocols",
         "libxkbcommon",
+        "libft2.nodep",
     ],
     srcs: [
+        "decor.cpp",
         "extension.cpp",
         "gralloc_handler.cpp",
         "hwcomposer.cpp",
-        "refresh.cpp",
         "wayland-hwc.cpp",
         "WaydroidClipboard.cpp",
         "WaydroidWindow.cpp",
@@ -76,12 +78,30 @@ cc_library_shared {
     ],
     generated_sources: [
         "wayland_android_client_protocol_sources",
+        "cursor_shape_v1_client_protocol_sources",
         "color_management_v1_client_protocol_sources",
     ],
     generated_headers: [
         "wayland_android_client_protocol_headers",
+        "cursor_shape_v1_client_protocol_headers",
         "color_management_v1_client_protocol_headers",
     ],
+}
+
+// cursor-shape-v1 from wayland-protocols 1.50 (staging), newer than external/wayland-protocols
+genrule {
+    name: "cursor_shape_v1_client_protocol_sources",
+    srcs: ["cursor-shape-v1.xml"],
+    tools: ["wayland_scanner"],
+    cmd: "$(location wayland_scanner) private-code < $(in) > $(out)",
+    out: ["cursor-shape-v1-protocol.c"],
+}
+genrule {
+    name: "cursor_shape_v1_client_protocol_headers",
+    srcs: ["cursor-shape-v1.xml"],
+    tools: ["wayland_scanner"],
+    cmd: "$(location wayland_scanner) client-header < $(in) > $(out)",
+    out: ["cursor-shape-v1-client-protocol.h"],
 }
 
 // color-management-v1 from wayland-protocols 1.50 (staging), newer than external/wayland-protocols
