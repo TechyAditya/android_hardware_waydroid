@@ -322,7 +322,7 @@ I haven't tested KDE, Hyprland or multi-window mode yet. I built the modules out
 
 ## 4. Video colours
 
-Posted on 2026-11-04 as issue [waydroid/waydroid#2471](https://github.com/waydroid/waydroid/issues/2471), PR [waydroid/android_vendor_waydroid#58](https://github.com/waydroid/android_vendor_waydroid/pull/58) from `TechyAditya:hdr`, and PR [waydroid/android_hardware_waydroid#94](https://github.com/waydroid/android_hardware_waydroid/pull/94) from `TechyAditya:pr/hdr-output`. The drafts below use `ISSUE`, `PR1`, and `PR2` for those numbers. The Bugbot and GPT-5.6 Sol findings worth fixing on #94 are folded into its commit, now `26797a7`, and its description below is the current one. Both reviewers found nothing in #58.
+Posted on 2026-11-04 as issue [waydroid/waydroid#2471](https://github.com/waydroid/waydroid/issues/2471), PR [waydroid/android_vendor_waydroid#58](https://github.com/waydroid/android_vendor_waydroid/pull/58) from `TechyAditya:hdr`, and PR [waydroid/android_hardware_waydroid#94](https://github.com/waydroid/android_hardware_waydroid/pull/94) from `TechyAditya:pr/hdr-output`. The drafts below use `ISSUE`, `PR1`, and `PR2` for those numbers. The Bugbot and GPT-5.6 Sol findings worth fixing on #94 are folded into its commit, now `d108e9b`. The description below is from `26797a7`; the one on #94 adds the 2026-11-10 changes for several monitors. Both reviewers found nothing in #58.
 
 This fork fixes the SDR part in its host decoder, which tags SDR video as sRGB. Upstream has no host decoder, so the vendor PR sets SurfaceFlinger's own switch for it instead.
 
@@ -422,9 +422,9 @@ Android reads the HDR capabilities when the display connects. Turning the output
 Tested on one HDR panel with Hyprland's HDR mode on, Hyprland 0.57, and LineageOS 20 images. Outputs in SDR mode report no HDR, so nothing changes there. This branch alone was compiled, not run.
 ```
 
-### Reply to review on #94 (draft)
+### Reply to review on #94 (posted)
 
-The maintainer asked on 2026-11-07: "I presume this has not been tested on GBM gralloc yet?"
+The maintainer asked on 2026-11-07: "I presume this has not been tested on GBM gralloc yet?" [Posted](https://github.com/waydroid/android_hardware_waydroid/pull/94#issuecomment-6779272015) on 2026-11-11, with a sentence after the first paragraph saying the test ran on `26797a7` and that head `d108e9b` changes nothing it depends on. If he agrees, the P010 check is a follow-up commit on #94.
 
 Tested on 2026-11-08 on the laptop's AMD iGPU, with the MUX in hybrid mode: Radeon Vega (Renoir), radeonsi, Mesa 26.0.8 in the vendor image. Waydroid generated its own properties for it: `ro.hardware.gralloc=gbm` (`minigbm_gbm_mesa` on this vendor image), `ro.hardware.egl=mesa`, `ro.hardware.vulkan=radeon` and `debug.stagefright.ccodec=0`. The overlay held this fork's other files too; only the composer was swapped between this branch and `lineage-20`. Hyprland 0.57 ran on the same AMD GPU with HDR mode on. Clips: HDR10 HEVC Main10 and VP9 Profile 2 tagged BT.2020 PQ, played in Gallery, with Codec2 off (Waydroid's default) and on. Screenshots came from both Android's `screencap` and the host.
 
