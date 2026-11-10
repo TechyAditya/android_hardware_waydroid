@@ -6,6 +6,12 @@ set -euo pipefail
 
 here=$(cd "$(dirname "$0")" && pwd)
 build=$here/build
+
+# The render server inlines shader calls for NVIDIA's compiler with SPIRV-Tools
+if [ ! -e /usr/include/spirv-tools/libspirv.h ]; then
+   echo "Missing SPIRV-Tools headers (spirv-tools package)." >&2
+   exit 1
+fi
 # install.sh copies the host build to /usr/local/lib/waydroid-venus
 prefix=/usr/local/lib/waydroid-venus
 host_out=$build/host
@@ -28,24 +34,45 @@ mkdir -p "$build/out"
 # Checks out COMMIT of URL into DIR with PATCH applied.  An existing tree is
 # used only if it is at COMMIT with exactly PATCH applied, so an interrupted
 # run or an updated patch cannot build stale sources.
+# Checks out COMMIT of URL into DIR with PATCH... applied. One patch stays an
+# uncommitted change; several are committed one by one, so that each can be
+# compared with its file.
 fetch() {
-   local url=$1 commit=$2 dir=$3 patch=$4
+   local url=$1 commit=$2 dir=$3
+   shift 3
    if [ -d "$dir" ]; then
-      if [ "$(git -C "$dir" rev-parse HEAD)" != "$commit" ] ||
-         ! git -C "$dir" diff HEAD | cmp -s - "$patch" ||
-         [ -n "$(git -C "$dir" ls-files --others --exclude-standard)" ]; then
-         echo "$dir does not match $(basename "$patch"); remove it to rebuild" >&2
+      local ok=true i
+      if [ $# -eq 1 ]; then
+         [ "$(git -C "$dir" rev-parse HEAD)" = "$commit" ] &&
+            git -C "$dir" diff HEAD | cmp -s - "$1" || ok=false
+      else
+         [ "$(git -C "$dir" rev-parse "HEAD~$#")" = "$commit" ] || ok=false
+         for ((i = 0; i < $#; i++)); do
+            local p=$((i + 1))
+            git -C "$dir" show --format= "HEAD~$(($# - 1 - i))" | cmp -s - "${!p}" || ok=false
+         done
+         [ -z "$(git -C "$dir" diff HEAD)" ] || ok=false
+      fi
+      if ! $ok || [ -n "$(git -C "$dir" ls-files --others --exclude-standard)" ]; then
+         echo "$dir does not match its patches; remove it to rebuild" >&2
          exit 1
       fi
       return
    fi
 
-   local tmp=$dir.tmp
+   local tmp=$dir.tmp patch
    rm -rf "$tmp"
    git init -q "$tmp"
    git -C "$tmp" fetch -q --depth 1 "$url" "$commit"
    git -C "$tmp" checkout -q FETCH_HEAD
-   git -C "$tmp" apply "$patch"
+   for patch in "$@"; do
+      git -C "$tmp" apply "$patch"
+      if [ $# -gt 1 ]; then
+         git -C "$tmp" add -A
+         git -C "$tmp" -c user.name=build -c user.email=build@localhost \
+            commit -q -m "$(basename "$patch")"
+      fi
+   done
    mv "$tmp" "$dir"
 }
 
@@ -73,7 +100,8 @@ fetch_headers() {
 }
 
 fetch https://gitlab.freedesktop.org/virgl/virglrenderer.git "$virgl_commit" \
-   "$build/virglrenderer" "$here/patches/virglrenderer-vtest-import-fd.patch"
+   "$build/virglrenderer" "$here/patches/virglrenderer-vtest-import-fd.patch" \
+   "$here/patches/virglrenderer-nvidia-spirv-flatten.patch"
 fetch https://gitlab.freedesktop.org/mesa/mesa.git "$mesa_commit" \
    "$build/mesa" "$here/patches/mesa-venus-vtest-android.patch"
 fetch https://android.googlesource.com/platform/hardware/libhardware "$libhardware_commit" \
