@@ -1,0 +1,286 @@
+diff --git a/src/meson.build b/src/meson.build
+index 138301c..ac121d2 100644
+--- a/src/meson.build
++++ b/src/meson.build
+@@ -82,6 +82,7 @@ venus_sources = [
+    'venus/vkr_render_pass.c',
+    'venus/vkr_renderer.c',
+    'venus/vkr_ring.c',
++   'venus/vkr_spirv.c',
+    'venus/vkr_transport.c',
+ ]
+ 
+@@ -199,6 +200,15 @@ if with_venus
+    virgl_sources += venus_sources
+    virgl_sources += venus_codegen
+    virgl_depends += [venus_dep]
++   # NVIDIA shader compiler workaround, see venus/vkr_spirv.h
++   # The optimizer's C API is in libSPIRV-Tools-opt, which has no pkg-config file
++   spirv_tools_opt_dep = cc.find_library('SPIRV-Tools-opt', required : false,
++                                         has_headers : ['spirv-tools/libspirv.h'])
++   spirv_tools_dep = cc.find_library('SPIRV-Tools', required : false)
++   if spirv_tools_opt_dep.found() and spirv_tools_dep.found()
++      virgl_depends += [declare_dependency(dependencies : [spirv_tools_opt_dep, spirv_tools_dep],
++                                           compile_args : '-DHAVE_SPIRV_TOOLS')]
++   endif
+ endif
+ 
+ if with_drm_renderers
+diff --git a/src/venus/vkr_physical_device.c b/src/venus/vkr_physical_device.c
+index 9cc1aff..67ceec3 100644
+--- a/src/venus/vkr_physical_device.c
++++ b/src/venus/vkr_physical_device.c
+@@ -156,11 +156,20 @@ vkr_physical_device_init_id_properties(struct vkr_physical_device *physical_dev)
+ 
+    VkPhysicalDevice handle = physical_dev->base.handle.physical_device;
+    physical_dev->id_properties.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ID_PROPERTIES;
++   VkPhysicalDeviceDriverProperties driver_props = {
++      .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DRIVER_PROPERTIES,
++   };
++   if (physical_dev->properties.apiVersion >= VK_API_VERSION_1_2)
++      physical_dev->id_properties.pNext = &driver_props;
+    VkPhysicalDeviceProperties2 props2 = {
+       .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2,
+       .pNext = &physical_dev->id_properties
+    };
+    vk->GetPhysicalDeviceProperties2(handle, &props2);
++   physical_dev->id_properties.pNext = NULL;
++
++   /* see vkr_spirv_flatten() */
++   physical_dev->flatten_spirv = driver_props.driverID == VK_DRIVER_ID_NVIDIA_PROPRIETARY;
+ }
+ 
+ static void
+diff --git a/src/venus/vkr_physical_device.h b/src/venus/vkr_physical_device.h
+index b0b6691..b959299 100644
+--- a/src/venus/vkr_physical_device.h
++++ b/src/venus/vkr_physical_device.h
+@@ -29,6 +29,8 @@ struct vkr_physical_device {
+ 
+    VkPhysicalDeviceMemoryProperties memory_properties;
+    VkPhysicalDeviceIDProperties id_properties;
++   /* inline shader calls before the driver compiles them, see vkr_spirv_flatten() */
++   bool flatten_spirv;
+    bool is_dma_buf_fd_export_supported;
+    bool is_opaque_fd_export_supported;
+    void *gbm_device;
+diff --git a/src/venus/vkr_pipeline.c b/src/venus/vkr_pipeline.c
+index 76709b9..85b574f 100644
+--- a/src/venus/vkr_pipeline.c
++++ b/src/venus/vkr_pipeline.c
+@@ -5,7 +5,62 @@
+ 
+ #include "vkr_pipeline.h"
+ 
++#include "vkr_physical_device.h"
+ #include "vkr_pipeline_gen.h"
++#include "vkr_spirv.h"
++
++/* Rewrites the decoded create info in place. Returns the copy to free after the driver call. */
++static uint32_t *
++vkr_flatten_shader_module_info(struct vkr_device *dev, const VkShaderModuleCreateInfo *info)
++{
++   uint32_t *code;
++   size_t size;
++   if (!dev->physical_device->flatten_spirv ||
++       !vkr_spirv_flatten(info->pCode, info->codeSize, &code, &size))
++      return NULL;
++   VkShaderModuleCreateInfo *writable = (VkShaderModuleCreateInfo *)info;
++   writable->pCode = code;
++   writable->codeSize = size;
++   return code;
++}
++
++struct vkr_flattened_codes {
++   uint32_t **codes;
++   uint32_t count;
++};
++
++/* for shader code passed inline in a stage's pNext, without a VkShaderModule */
++static void
++vkr_flatten_pipeline_stages(struct vkr_device *dev,
++                            const VkPipelineShaderStageCreateInfo *stages,
++                            uint32_t stage_count,
++                            struct vkr_flattened_codes *flattened)
++{
++   for (uint32_t i = 0; i < stage_count; i++) {
++      for (const VkBaseInStructure *p = stages[i].pNext; p; p = p->pNext) {
++         if (p->sType != VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO)
++            continue;
++         uint32_t *code = vkr_flatten_shader_module_info(dev, (const void *)p);
++         if (!code)
++            continue;
++         uint32_t **codes = realloc(flattened->codes, (flattened->count + 1) * sizeof(*codes));
++         if (!codes) {
++            free(code);
++            continue;
++         }
++         flattened->codes = codes;
++         flattened->codes[flattened->count++] = code;
++      }
++   }
++}
++
++static void
++vkr_free_flattened_codes(struct vkr_flattened_codes *flattened)
++{
++   for (uint32_t i = 0; i < flattened->count; i++)
++      free(flattened->codes[i]);
++   free(flattened->codes);
++}
+ 
+ static void
+ vkr_dispatch_vkCreateShaderModule(struct vn_dispatch_context *dispatch,
+@@ -41,7 +96,10 @@ vkr_dispatch_vkCreateShaderModule(struct vn_dispatch_context *dispatch,
+       return;
+    }
+ 
++   struct vkr_device *dev = vkr_device_from_handle(args->device);
++   uint32_t *flattened = vkr_flatten_shader_module_info(dev, args->pCreateInfo);
+    vkr_shader_module_create_and_add(dispatch->data, args);
++   free(flattened);
+ }
+ 
+ static void
+@@ -113,8 +171,14 @@ vkr_dispatch_vkCreateGraphicsPipelines(struct vn_dispatch_context *dispatch,
+    struct vkr_context *ctx = dispatch->data;
+    struct vkr_device *dev = vkr_device_from_handle(args->device);
+    struct object_array arr;
+-
+-   if (vkr_graphics_pipeline_create_array(ctx, args, &arr) < VK_SUCCESS)
++   struct vkr_flattened_codes flattened = { 0 };
++
++   for (uint32_t i = 0; i < args->createInfoCount; i++)
++      vkr_flatten_pipeline_stages(dev, args->pCreateInfos[i].pStages,
++                                  args->pCreateInfos[i].stageCount, &flattened);
++   VkResult result = vkr_graphics_pipeline_create_array(ctx, args, &arr);
++   vkr_free_flattened_codes(&flattened);
++   if (result < VK_SUCCESS)
+       return;
+ 
+    vkr_pipeline_add_array(ctx, dev, &arr, args->pPipelines);
+@@ -128,8 +192,13 @@ vkr_dispatch_vkCreateComputePipelines(struct vn_dispatch_context *dispatch,
+    struct vkr_context *ctx = dispatch->data;
+    struct vkr_device *dev = vkr_device_from_handle(args->device);
+    struct object_array arr;
++   struct vkr_flattened_codes flattened = { 0 };
+ 
+-   if (vkr_compute_pipeline_create_array(ctx, args, &arr) < VK_SUCCESS)
++   for (uint32_t i = 0; i < args->createInfoCount; i++)
++      vkr_flatten_pipeline_stages(dev, &args->pCreateInfos[i].stage, 1, &flattened);
++   VkResult result = vkr_compute_pipeline_create_array(ctx, args, &arr);
++   vkr_free_flattened_codes(&flattened);
++   if (result < VK_SUCCESS)
+       return;
+ 
+    vkr_pipeline_add_array(ctx, dev, &arr, args->pPipelines);
+diff --git a/src/venus/vkr_spirv.c b/src/venus/vkr_spirv.c
+new file mode 100644
+index 0000000..924ec61
+--- /dev/null
++++ b/src/venus/vkr_spirv.c
+@@ -0,0 +1,76 @@
++/*
++ * Copyright 2026 The Waydroid Project
++ * SPDX-License-Identifier: MIT
++ */
++
++#include "vkr_spirv.h"
++
++#include <stdlib.h>
++#include <string.h>
++
++#ifdef HAVE_SPIRV_TOOLS
++#include <spirv-tools/libspirv.h>
++
++static bool
++has_function_call(const uint32_t *code, size_t words)
++{
++   const uint32_t op_function_call = 57;
++   /* the header is 5 words; each instruction starts with its word count and opcode */
++   for (size_t i = 5; i < words;) {
++      uint32_t count = code[i] >> 16;
++      if ((code[i] & 0xffff) == op_function_call)
++         return true;
++      if (!count)
++         return false;
++      i += count;
++   }
++   return false;
++}
++
++bool
++vkr_spirv_flatten(const uint32_t *code, size_t size, uint32_t **out, size_t *out_size)
++{
++   const size_t words = size / 4;
++   if (words < 5 || !has_function_call(code, words) || getenv("VKR_NO_SPIRV_FLATTEN"))
++      return false;
++
++   spv_optimizer_t *optimizer = spvOptimizerCreate(SPV_ENV_UNIVERSAL_1_6);
++   spv_optimizer_options options = spvOptimizerOptionsCreate();
++   /* merge-return first, or a function returning from inside a branch isn't inlined */
++   const char *flags[] = { "--merge-return", "--inline-entry-points-exhaustive",
++                           "--eliminate-dead-functions" };
++   spv_binary binary = NULL;
++   bool ok = optimizer && options &&
++             spvOptimizerRegisterPassesFromFlagsWhilePreservingTheInterface(
++                optimizer, flags, sizeof(flags) / sizeof(flags[0])) &&
++             spvOptimizerRun(optimizer, code, words, &binary, options) == SPV_SUCCESS && binary;
++   if (options)
++      spvOptimizerOptionsDestroy(options);
++   if (optimizer)
++      spvOptimizerDestroy(optimizer);
++
++   if (ok) {
++      *out_size = binary->wordCount * 4;
++      *out = malloc(*out_size);
++      ok = *out != NULL;
++      if (ok)
++         memcpy(*out, binary->code, *out_size);
++   }
++   if (binary)
++      spvBinaryDestroy(binary);
++   return ok;
++}
++
++#else
++
++bool
++vkr_spirv_flatten(const uint32_t *code, size_t size, uint32_t **out, size_t *out_size)
++{
++   (void)code;
++   (void)size;
++   (void)out;
++   (void)out_size;
++   return false;
++}
++
++#endif
+diff --git a/src/venus/vkr_spirv.h b/src/venus/vkr_spirv.h
+new file mode 100644
+index 0000000..8d55ef1
+--- /dev/null
++++ b/src/venus/vkr_spirv.h
+@@ -0,0 +1,22 @@
++/*
++ * Copyright 2026 The Waydroid Project
++ * SPDX-License-Identifier: MIT
++ */
++
++#ifndef VKR_SPIRV_H
++#define VKR_SPIRV_H
++
++#include <stdbool.h>
++#include <stddef.h>
++#include <stdint.h>
++
++/* NVIDIA's proprietary shader compiler crashes in vkCreateGraphicsPipelines (_nv002nvvm in
++ * libnvidia-glvkspirv, then libnvidia-gpucomp) on valid SPIR-V that calls a function returning
++ * from inside a branch from another function. Android's HDR thumbnail shader, from ANGLE, does.
++ * This inlines every call into the entry points first. Returns true and a malloc'ed copy in *out
++ * when the module had calls and was rewritten; false leaves the module as it is.
++ */
++bool
++vkr_spirv_flatten(const uint32_t *code, size_t size, uint32_t **out, size_t *out_size);
++
++#endif /* VKR_SPIRV_H */
