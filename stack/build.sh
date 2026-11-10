@@ -4,6 +4,9 @@
 #   vendor/lib64/libhwc2on1adapter.so           HWC2-on-HWC1 adapter with Waydroid's patches and HDR passthrough
 #   vendor/lib{,64}/hw/audio.primary.waydroid.so audio HAL (native sample rate, float output)
 #   vendor/etc/audio_policy_configuration.xml
+#   vendor/lib64/vendor.waydroid.task@1.1.so    task HAL interface 1.1 (setRefreshRate), also in system/system_ext/lib64
+#   system/bin/hw/vendor.waydroid.task@1.0-service, system/etc/init/...rc  task HAL service that serves 1.1
+#   vendor/etc/vintf/manifest.xml               the image's manifest with vendor.waydroid.task at 1.1
 # The result is laid out like /var/lib/waydroid/overlay in stack/build/dist. Install it with stack/install.sh.
 #
 # Needs: clang, lld, llvm-ar, a host C compiler, curl, git, expat and alsa-lib headers.
@@ -22,6 +25,7 @@ VNDK_BRANCH=android14-release
 LIBDRM_SHA=6bfcfc725fbe0ece0918535556d61ee567b1ffff
 MINIGBM_SHA=e5a7769a4892cd1b6c61c56a8bedfc9b93584704
 INTERFACES_SHA=2f83e1bda9536aaf406352c868a8192cc3526a69
+VENDOR_WAYDROID_SHA=4dced17d9528ba07f6a6eab11b78a8ed38a36067
 WAYLAND_PROTOCOLS_TAG=1.50
 
 for tool in clang clang++ ld.lld llvm-ar cc curl git tar base64; do
@@ -82,6 +86,37 @@ if [[ ! -e $W/.fetched ]]; then
     touch "$W/.fetched"
 fi
 
+# --- Sources for the title bars and the task HAL (fetched once, also into an older build folder) ---
+if [[ ! -e $W/.fetched-task11 ]]; then
+    echo "Fetching FreeType, bionic's start-up files and Waydroid's HIDL patches into $W"
+    rm -rf "$S/freetype" "$S/bionic-crt"
+    gs platform/external/freetype "" "$S/freetype"
+    gs platform/bionic libc/arch-common/bionic "$S/bionic-crt"
+    # Waydroid's libhwbinder and libhidl add a virtual isHostHwBinder() to IBinder. A stub built
+    # against unpatched headers calls the wrong vtable slot and crashes on its first transaction.
+    WP=https://raw.githubusercontent.com/waydroid/android_vendor_waydroid/$VENDOR_WAYDROID_SHA/waydroid-patches/base-patches-33/system
+    apply_headers() { # dir pattern patch...
+        local dir=$1 pattern=$2; shift 2
+        # Its own repository, as for the adapter, or git apply resolves paths against this checkout
+        git init -q "$dir"
+        for p in "$@"; do curl -fsSL "$WP/$p" | git -C "$dir" apply --include="$pattern"; done
+    }
+    apply_headers "$V/system/libhwbinder" 'include/*' \
+        libhwbinder/0001-hwbinder-Add-support-for-host_hwbinder-driver.patch \
+        libhwbinder/0002-Never-set-FLAT_BINDER_FLAG_TXN_SECURITY_CTX-flag.patch
+    apply_headers "$V/system/libhidl" '*include/*' \
+        libhidl/0001-ServiceManagement-Use-host_hwbinder-if-available.patch \
+        libhidl/0002-Select-host_hwbinder-by-passing-argument-instead-of-.patch \
+        libhidl/0003-Don-t-wait-for-host-hwbinder.patch \
+        libhidl/0004-Always-re-new-ServiceManager.patch \
+        libhidl/0005-Fix-ABI-breakage-headers.patch \
+        libhidl/0006-libhidl-Add-vendor_extra-to-passthrough-paths.patch \
+        libhidl/0007-Always-pass-useHostHwBinder-to-modified-methods-that.patch \
+        libhidl/0008-Add-support-for-host-hals-whitelist.patch
+    grep -q isHostHwBinder "$V/system/libhwbinder/include/hwbinder/IBinder.h" || { echo "HIDL patches did not apply." >&2; exit 1; }
+    touch "$W/.fetched-task11"
+fi
+
 # --- Image libraries ---
 if [[ ! -e $R/system/lib64/liblog.so ]]; then
     echo "$R is not mounted. Start Waydroid (waydroid session start) and run this again." >&2
@@ -93,7 +128,8 @@ BIONIC=$R/system/apex/com.android.runtime/lib64/bionic
 cp -f $R/system/lib64/{liblog,libsync,libEGL,libGLESv2}.so $VNDK/{libutils,libcutils,libhardware,libhidlbase,libui,libc++}.so \
     $R/vendor/lib64/libdrm.so $R/vendor/lib64/vendor.waydroid.*.so $BIONIC/{libc,libm,libdl}.so "$L/"
 
-mkdir -p $O/obj/{ffi,wayland,xkb,proto,hwc/modes,adapter} $O/proto $O/empty $D/lib64/hw $D/lib/hw $D/etc
+mkdir -p $O/obj/{ffi,wayland,xkb,proto,hwc/modes,adapter,ft,task,crt} $O/proto $O/empty $D/lib64/hw $D/lib/hw $D/etc/vintf \
+    $W/dist/system/system_ext/lib64 $W/dist/system/bin/hw $W/dist/system/etc/init $W/syslibs
 
 # --- Wayland scanner (from the same wayland release; newer scanners emit wl_proxy_marshal_flags) ---
 (cd $S/wayland && cc -O2 -I. -Isrc -include config.h src/scanner.c src/wayland-util.c -lexpat -o $O/wayland-scanner)
@@ -124,6 +160,8 @@ declare -A XML=(
     [pointer-constraints-unstable-v1]=$AP/unstable/pointer-constraints/pointer-constraints-unstable-v1.xml
     [relative-pointer-unstable-v1]=$AP/unstable/relative-pointer/relative-pointer-unstable-v1.xml
     [idle-inhibit-unstable-v1]=$AP/unstable/idle-inhibit/idle-inhibit-unstable-v1.xml
+    [xdg-decoration-unstable-v1]=$AP/unstable/xdg-decoration/xdg-decoration-unstable-v1.xml
+    [cursor-shape-v1]=$ROOT/hwcomposer/cursor-shape-v1.xml
     [fractional-scale-v1]=$S/fractional-scale-v1.xml
 )
 for name in "${!XML[@]}"; do
@@ -161,6 +199,16 @@ llvm-ar rcs $O/libffi.a $O/obj/ffi/*.o
 llvm-ar rcs $O/libwayland_client_static.a $O/obj/wayland/*.o
 llvm-ar rcs $O/libxkbcommon.a $O/obj/xkb/*.o
 
+# FreeType, for the window titles the composer draws (libft2.nodep in Android.bp)
+F=$S/freetype
+for f in autofit/autofit base/ftbase base/ftbbox base/ftbitmap base/ftdebug base/ftfstype base/ftgasp base/ftglyph \
+         base/ftinit base/ftmm base/ftstroke base/fttype1 base/ftsystem cid/type1cid cff/cff gzip/ftgzip psaux/psaux \
+         pshinter/pshinter psnames/psnames raster/raster sdf/sdf sfnt/sfnt smooth/smooth truetype/truetype type1/type1; do
+    "${CC[@]}" -I$F/include -DFT2_BUILD_LIBRARY -DDARWIN_NO_CARBON -Wno-everything -c $F/src/$f.c -o $O/obj/ft/$(basename $f).o
+done
+rm -f $O/libft2.a
+llvm-ar rcs $O/libft2.a $O/obj/ft/*.o
+
 # --- Composer ---
 GEN_INCLUDES=()
 while IFS= read -r d; do GEN_INCLUDES+=(-isystem "$d"); done < <(find $V/generated-headers -type d \( -path '*genc++_headers/gen' -o -path '*-ndk-source/gen/include' \) | sort)
@@ -194,6 +242,7 @@ SYS_INCLUDES=(
     -isystem $V/frameworks/native/libs/binder/ndk/include_ndk
     -isystem $V/frameworks/native/libs/binder/ndk/include_platform
     "${GEN_INCLUDES[@]}"
+    -isystem $S/freetype/include
     -isystem $HERE/inputs/hidl-headers
     -isystem $W/extra
     -isystem $S/android_external_libdrm/include/drm
@@ -212,6 +261,60 @@ BUILTINS=$(clang -print-resource-dir)/lib/linux/libclang_rt.builtins-x86_64.a
 echo '__attribute__((visibility("hidden"))) void *__dso_handle = &__dso_handle;' > $O/dso_handle.c
 clang "${COMMON[@]}" -c $O/dso_handle.c -o $O/obj/hwc/dso_handle.o
 
+# --- Task HAL: vendor.waydroid.task@1.1 and the service that serves it ---
+# hidl-gen output for 1.1, adapted to Waydroid's libhidl, is in inputs/hidl-sources; the image has 1.0
+clang++ "${COMMON[@]}" "${CXXFLAGS[@]}" "${SYS_INCLUDES[@]}" -Wno-everything \
+    -c $HERE/inputs/hidl-sources/vendor.waydroid.task@1.1/WaydroidTaskAll.cpp -o $O/obj/task/task11.o
+clang++ --target=x86_64-linux-android33 --sysroot=$O/empty -fuse-ld=lld -shared -nostdlib \
+    -Wl,-soname,vendor.waydroid.task@1.1.so -Wl,--no-undefined -Wl,-z,noexecstack \
+    $O/obj/task/task11.o $O/obj/hwc/dso_handle.o "$BUILTINS" \
+    $L/libhidlbase.so $L/libutils.so $L/libcutils.so $L/liblog.so $L/vendor.waydroid.task@1.0.so \
+    $L/libc++.so $L/libc.so $L/libm.so $L/libdl.so -o $L/vendor.waydroid.task@1.1.so
+cp $L/vendor.waydroid.task@1.1.so $D/lib64/
+cp $L/vendor.waydroid.task@1.1.so $W/dist/system/system_ext/lib64/
+
+# The service is a system executable, so it needs bionic's start-up objects
+CRT=(--target=x86_64-linux-android33 -fPIE -O2 -nostdinc -isystem "$(clang -print-resource-dir)/include"
+    -isystem $I/bionic/include -isystem $I/bionic/uapi -isystem $I/bionic/uapi/asm-x86 -isystem $I/bionic/android-uapi
+    -I$HERE/inputs/crt -I$S/bionic-crt)
+sed 's|#include "../../bionic/libc_init_common.h"|#include "libc_init_common.h"|' $S/bionic-crt/crtbegin.c > $O/crtbegin.c
+clang "${CRT[@]}" -c $O/crtbegin.c -o $O/obj/crt/crtbegin_dynamic.o
+clang "${CRT[@]}" -c $S/bionic-crt/crtend.S -o $O/obj/crt/crtend_android.o
+
+SL=$W/syslibs TD=$ROOT/interfaces/task/1.0/default
+cp -f $R/system/lib64/{libbinder,libbase,libutils,libcutils,liblog,libhidlbase,libhardware,libc++}.so $BIONIC/{libc,libm,libdl}.so \
+    $R/system/system_ext/lib64/vendor.waydroid.task@1.0.so $SL/
+# libc++ before clang's own headers, or <cstddef> can't find stddef.h
+SVC=(--target=x86_64-linux-android33 -fPIE -O2 -g0 -nostdinc -DANDROID -std=gnu++17 -nostdinc++ -fno-exceptions -fno-rtti
+    -isystem $V/external/libcxx/include -isystem $V/external/libcxxabi/include
+    -isystem $V/frameworks/native/libs/binder/include -isystem $I/liblog
+    "${SYS_INCLUDES[@]}" -I$TD/binder-interfaces/include -Wall -Wno-unused-parameter)
+mkdir -p $O/task-src
+# libbinder rejects hand-written interfaces through IMPLEMENT_META_INTERFACE; the macro it wraps is the same code
+for f in IActivityTaskManager IPlatform; do
+    sed 's/^IMPLEMENT_META_INTERFACE(/DO_NOT_DIRECTLY_USE_ME_IMPLEMENT_META_INTERFACE(/' $TD/binder-interfaces/$f.cpp > $O/task-src/$f.cpp
+done
+objs=()
+for f in $TD/service.cpp $TD/WaydroidTask.cpp $O/task-src/IActivityTaskManager.cpp $O/task-src/IPlatform.cpp; do
+    out=$O/obj/task/$(basename ${f%.cpp}).o
+    clang++ "${SVC[@]}" -c "$f" -o "$out"
+    objs+=("$out")
+done
+clang++ --target=x86_64-linux-android33 --sysroot=$O/empty -fuse-ld=lld -pie -nostdlib \
+    -Wl,--no-undefined -Wl,-z,noexecstack -Wl,-dynamic-linker,/system/bin/linker64 \
+    $O/obj/crt/crtbegin_dynamic.o "${objs[@]}" "$BUILTINS" \
+    $SL/libbinder.so $SL/libbase.so $SL/libutils.so $SL/libcutils.so $SL/liblog.so $SL/libhidlbase.so $SL/libhardware.so \
+    $SL/vendor.waydroid.task@1.0.so $L/vendor.waydroid.task@1.1.so $SL/libc++.so $SL/libc.so $SL/libm.so $SL/libdl.so \
+    $O/obj/crt/crtend_android.o -o $W/dist/system/bin/hw/vendor.waydroid.task@1.0-service
+cp $TD/vendor.waydroid.task@1.0-service.rc $W/dist/system/etc/init/
+
+# hwservicemanager registers only the versions the manifest declares. Without this one the service
+# registers as 1.0 and Android doesn't follow the monitor's refresh rate.
+sed '/<name>vendor.waydroid.task<\/name>/,/<\/hal>/ s|<version>1.0</version>|<version>1.1</version>|' \
+    $R/vendor/etc/vintf/manifest.xml > $D/etc/vintf/manifest.xml
+grep -A3 '<name>vendor.waydroid.task</name>' $D/etc/vintf/manifest.xml | grep -q '<version>1.1</version>' \
+    || { echo "Could not declare vendor.waydroid.task@1.1 in the manifest." >&2; exit 1; }
+
 SRC=$ROOT/hwcomposer
 objs=()
 for f in "$SRC"/*.cpp "$SRC"/modes/*.cpp; do
@@ -226,10 +329,10 @@ clang++ --target=x86_64-linux-android33 --sysroot=$O/empty -fuse-ld=lld -shared 
     -Wl,-soname,hwcomposer.waydroid.so -Wl,--no-undefined -Wl,-z,noexecstack -Wl,--gc-sections \
     -Wl,--exclude-libs,ALL -Wl,--hash-style=gnu \
     "${objs[@]}" $O/obj/proto/*.o \
-    $O/libwayland_client_static.a $O/libffi.a $O/libxkbcommon.a "$BUILTINS" \
+    $O/libwayland_client_static.a $O/libffi.a $O/libxkbcommon.a $O/libft2.a "$BUILTINS" \
     $L/liblog.so $L/libutils.so $L/libcutils.so $L/libhardware.so $L/libhidlbase.so \
     $L/libsync.so $L/libui.so $L/libdrm.so $L/libEGL.so $L/libGLESv2.so \
-    $L/vendor.waydroid.{clipboard@1.0,display@1.0,display@1.1,display@1.2,task@1.0,window@1.0,window@1.1,window@1.2}.so \
+    $L/vendor.waydroid.{clipboard@1.0,display@1.0,display@1.1,display@1.2,task@1.0,task@1.1,window@1.0,window@1.1,window@1.2}.so \
     $L/libc++.so $L/libc.so $L/libm.so $L/libdl.so \
     -o $D/lib64/hw/hwcomposer.waydroid.so
 

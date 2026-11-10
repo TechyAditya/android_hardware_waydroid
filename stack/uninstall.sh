@@ -8,15 +8,17 @@ set -euo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd)
 "$HERE/surfaceflinger.sh" uninstall
 "$HERE/services.sh" uninstall
-overlay=/var/lib/waydroid/overlay/vendor
+overlay=/var/lib/waydroid/overlay
 backup=/var/lib/waydroid/all-fixes-backup
 cfg=/var/lib/waydroid/waydroid.cfg
 [[ -f $backup/manifest ]] || { echo "Nothing to uninstall: $backup/manifest not found." >&2; exit 1; }
 
 while read -r state rel; do
     case $state in
-        saved) install -D -m 0644 "$backup/files/$rel" "$overlay/$rel"; echo "restored vendor/$rel" ;;
-        absent) rm -f "$overlay/$rel"; echo "removed vendor/$rel" ;;
+        saved) install -D -m 0644 "$backup/files/$rel" "$overlay/vendor/$rel"; echo "restored vendor/$rel" ;;
+        absent) rm -f "$overlay/vendor/$rel"; echo "removed vendor/$rel" ;;
+        saved-system) mkdir -p "$(dirname "$overlay/system/$rel")"; cp -a "$backup/system-files/$rel" "$overlay/system/$rel"; echo "restored system/$rel" ;;
+        absent-system) rm -f "$overlay/system/$rel"; echo "removed system/$rel" ;;
     esac
 done < "$backup/manifest"
 if [[ -f $backup/settings.json ]]; then

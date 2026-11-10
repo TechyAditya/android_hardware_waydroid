@@ -3,13 +3,13 @@
 This branch combines every fix from this fork into one checkout. It builds and installs four parts:
 
 - `waydroid-venus/` runs Android's Vulkan on the host GPU through Venus. It also has a GPU memory allocator for gralloc and a host video decoder that writes frames straight into GPU memory.
-- `stack/` builds the Wayland composer from `hwcomposer/`, the HWC2-on-HWC1 adapter, and the audio HAL from `audio/`.
+- `stack/` builds the Wayland composer from `hwcomposer/`, the HWC2-on-HWC1 adapter, the audio HAL from `audio/`, and the task HAL from `interfaces/task/` with its new interface version, `vendor.waydroid.task@1.1`.
 - `waydroid-app-displays/` opens each Android app in its own host window, on an Android display of its own. It also has a `waydroid-app-displays` command for hidden and fixed-size displays, and it shows Android media players in the desktop's media controls.
 - `hwcomposer/` and `audio/` are the composer and audio HAL sources that `stack/build.sh` compiles.
 
 The install also sets the Waydroid settings that the stack is tested with, so you get the same setup as its author. [Settings the install sets](#settings-the-install-sets) lists them.
 
-The composer changes are per-monitor refresh rates up to the display's own rate, rate-limited resize hotplugs, single-window focus fixes, GPU-memory dma-buf presentation, and HDR output. The audio HAL plays at the device's native sample rate with float output.
+The composer changes are refresh rates that follow the monitor a window is on, rate-limited resize hotplugs, single-window size, focus and lifetime fixes, title bars for Waydroid's own windows, GPU-memory dma-buf presentation, HDR output, and full UI frames that wait for Android to finish drawing. The audio HAL plays at the device's native sample rate with float output.
 
 ## Requirements
 
@@ -149,7 +149,7 @@ The setting applies to every app on the desktop. If a filter chain, such as a sp
 
 ## Optional: give every app window a title bar with Back
 
-With `persist.waydroid.app_titlebar` at `auto`, the default, a per-app window asks the compositor for a title bar through the `xdg-decoration` protocol. Where the compositor doesn't offer the protocol, or asks the window to decorate itself, the window draws its own. It has a Back button on the left, then the window buttons of your desktop's button layout, in your light or dark style. GNOME, for example, offers no `xdg-decoration`, so its windows draw their own. KWin draws the title bar with your decoration theme. Hyprland always answers that it decorates windows itself, and draws no title bars, so windows there have none. Everywhere, Esc and the mouse's back button also act as Back.
+This applies to per-app windows and to Waydroid's own windows (the full Android window, and app windows outside the per-app window service). With `persist.waydroid.app_titlebar` at `auto`, the default, a window asks the compositor for a title bar through the `xdg-decoration` protocol. Where the compositor doesn't offer the protocol, or asks the window to decorate itself, the window draws its own. It has a Back button on the left, then the window buttons of your desktop's button layout, in your light or dark style. GNOME, for example, offers no `xdg-decoration`, so its windows draw their own. KWin draws the title bar with your decoration theme. Hyprland always answers that it decorates windows itself, and draws no title bars, so windows there have none. Everywhere, Esc and the mouse's back button also act as Back.
 
 To give windows their own title bar with the Back button where the compositor would draw one, as on KDE:
 
@@ -196,7 +196,7 @@ To remove Widevine, run `sudo ./waydroid-venus/uninstall-widevine.sh`. It also r
 - To open an app in its own window, run `waydroid app launch PACKAGE`, for example `waydroid app launch com.google.android.youtube`. Waydroid's desktop entries run the same command, so app launchers open separate windows too.
 - To open the whole Android screen in one window, run `waydroid show-full-ui`.
 
-Android follows the refresh rate of the monitors that show app windows: the per-app window service sets Android's refresh rate settings to the fastest monitor showing one, and the composer offers a display config for every monitor's rate. Moving an app window to a 60 Hz monitor switches Android to 60 Hz. The full Android window does not follow, so Android keeps its rate there.
+Android follows the refresh rate of the monitors that show app windows: the per-app window service sets Android's refresh rate settings to the fastest monitor showing one, and the composer offers a display config for every monitor's rate. Moving an app window to a 60 Hz monitor switches Android to 60 Hz. The composer does the same for Waydroid's own windows, the full Android window included, through the task HAL's `setRefreshRate()`.
 
 Android media players, such as Apple Music or YouTube, show in the desktop's media controls through MPRIS, like a browser or Spotify does. They show the title, the cover, and the position, and they take play, pause, skip, and seek.
 
@@ -281,7 +281,7 @@ waydroid session stop
 
 An update keeps the settings you changed in `waydroid.cfg`. `stack/install.sh` writes each setting only on the first install that has it, and prints each one it writes.
 
-After a Waydroid image update, run `stack/build.sh` and `sudo ./stack/install.sh` again, because the composer links against the image's libraries. The install also removes the patched SurfaceFlinger when the new system image no longer matches it, so the old binary cannot replace the new one.
+After a Waydroid image update, run `stack/build.sh` and `sudo ./stack/install.sh` again, because the composer links against the image's libraries, and the vendor manifest the install puts in the overlay is the image's own with `vendor.waydroid.task` at 1.1. The install also removes the patched SurfaceFlinger when the new system image no longer matches it, so the old binary cannot replace the new one.
 
 ## Uninstall
 
