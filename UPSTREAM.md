@@ -176,7 +176,9 @@ waydroid/android_hardware_waydroid#93 fixes items 4 to 7. waydroid/android_hardw
 Title: `hwcomposer: fix window size, lifetime and focus, and full UI close with several windows`
 
 ```markdown
-Fixes items 4 to 7 of waydroid/waydroid#2470. Items 1 to 3 are multi-window mode problems that this PR does not change. For the resize crash, see waydroid/waydroid#2464 and #92. The refresh rate change for item 8 moved to #95, which also makes Android follow the monitor.
+Fixes items 4 to 7 of waydroid/waydroid#2470. Items 1 to 3 are multi-window mode problems that this PR does not change. For the resize crash, see waydroid/waydroid#2464 and #92.
+
+The refresh rate fix for item 8 is a separate PR, #95, to keep this one simple to review. It started as the last commit here, and it now also makes Android follow the monitor a window is on. Both PRs add lines at the start of `window::~window()`, so whichever merges second needs a small rebase, which I'll do; it will also move #95's new surface handlers to the window lookup from commit 3 here.
 
 ## Changes
 
