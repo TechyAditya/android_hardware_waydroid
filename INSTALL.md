@@ -19,7 +19,7 @@ The composer changes are refresh rates that follow the monitor a window is on, r
 
 ```sh
 sudo pacman -S --needed base-devel git curl clang lld llvm meson ninja python-mako python-yaml \
-	python-packaging libepoxy libdrm mesa ffmpeg vulkan-headers vulkan-icd-loader shaderc expat alsa-lib \
+	python-packaging libepoxy libdrm mesa ffmpeg vulkan-headers vulkan-icd-loader shaderc spirv-tools expat alsa-lib \
 	jre-openjdk-headless
 ```
 
@@ -303,7 +303,7 @@ waydroid session stop
 - HDR video shows as HDR only while Hyprland runs the monitor in HDR mode. Otherwise it shows as SDR.
 - RGBA video buffers take 2.7 times the memory of NV12. YouTube allocates 13 buffers of 3840x2160 for adaptive playback, which take about 430 MB of GPU memory as RGBA.
 - The stack was tested only on an NVIDIA GPU. The `nv12` route on other GPUs is untested.
-- Video thumbnails crash the Venus render server. When an app asks Android for a video thumbnail, as Gallery and the file picker do, `mediaserver` draws it on the GPU. The render server then crashes in NVIDIA's shader compiler (`libnvidia-glvkspirv`, during `vkCreateGraphicsPipelines`), and `mediaserver` aborts. Gallery stops playing, because it plays through `mediaserver`. It happens with every route in `persist.waydroid.video_sdr_output`. Not investigated yet; `coredumpctl list` shows each crash as a `virgl_render_server` dump followed by a `mediaserver` dump.
+- HDR video thumbnails show without tone mapping, so their colours look flat. Android draws an HDR thumbnail with its GPU tone mapper, and NVIDIA's shader compiler crashed on that shader, taking `mediaserver` down with the render server. The stack now sends HDR thumbnails through Android's CPU path (`stack/stagefright.sh`). The render server also rewrites shaders that call functions before NVIDIA compiles them, which avoids that crash for any app.
 
 ## Where each fix lives
 

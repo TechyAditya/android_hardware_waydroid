@@ -39,6 +39,7 @@ for part in vendor system; do
 done
 
 "$HERE/surfaceflinger.sh" install
+"$HERE/stagefright.sh" install
 "$HERE/services.sh" install
 
 changed=$(python3 "$HERE/settings.py" install "$cfg" "$backup/settings.json")
