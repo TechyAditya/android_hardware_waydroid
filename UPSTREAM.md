@@ -4,7 +4,7 @@ What this fork plans to send to Waydroid, in plain words. Merged on 2026-11-07 b
 
 1. **Smoother window resizing, without the crash.** Dragging a window edge made Android rebuild its screen about 150 times in 8 seconds, and Android's graphics crashed during the rebuilds ([#2464](https://github.com/waydroid/waydroid/issues/2464)). [#92](https://github.com/waydroid/android_hardware_waydroid/pull/92) cuts the rebuilds to about 15 and stretches the old frame meanwhile. It is open, with 150 ms as the default since the maintainer asked why it should stay off by default once the null check was merged. [android_vendor_waydroid#57](https://github.com/waydroid/android_vendor_waydroid/pull/57), the null check that SurfaceFlinger crashed on, is merged, and the maintainer closed #2464. [Drafts](#1-resizing-and-the-surfaceflinger-crash)
 2. **No more black flashes in the full Waydroid window.** The window was shown before Android finished drawing it. One PR. [Draft](#2-black-flashes-in-the-full-ui)
-3. **Several app windows behave.** Each window keeps its own size and closes with its app. Closing the full Waydroid window closes only its own apps. Android follows the monitor's refresh rate. Open as issue [waydroid#2470](https://github.com/waydroid/waydroid/issues/2470) and PR [#93](https://github.com/waydroid/android_hardware_waydroid/pull/93). Planned: move #93's refresh-rate commit into a leaner PR of its own that also makes Android follow the monitor a window is on, which shrinks #93 by almost half. [Drafts and plan](#3-several-app-windows)
+3. **Several app windows behave.** Each window keeps its own size and closes with its app. Closing the full Waydroid window closes only its own apps. Android follows the monitor's refresh rate. Open as issue [waydroid#2470](https://github.com/waydroid/waydroid/issues/2470) and PR [#93](https://github.com/waydroid/android_hardware_waydroid/pull/93). Planned: move #93's refresh-rate commit into a leaner PR of its own that also makes Android follow the monitor a window is on, which shrinks #93 by almost half. Written and tested on GNOME; not opened. [Drafts and plan](#3-several-app-windows)
 4. **Video shows in its own colours.** Ordinary (SDR) video no longer looks washed out, because Android stops brightening its dark parts; stock Waydroid does this too. HDR video shows as HDR when the compositor runs the monitor in HDR mode. Open as issue [waydroid#2471](https://github.com/waydroid/waydroid/issues/2471). [android_vendor_waydroid#58](https://github.com/waydroid/android_vendor_waydroid/pull/58) is merged; [#94](https://github.com/waydroid/android_hardware_waydroid/pull/94) is open. [Drafts](#4-video-colours)
 5. **No audio crackles at high sample rates.** Posted as [a comment](https://github.com/waydroid/android_hardware_waydroid/pull/91#issuecomment-6618281541) on [#91](https://github.com/waydroid/android_hardware_waydroid/pull/91), someone else's open audio PR, which already has half of the fix. [Draft](#5-audio-at-high-sample-rates)
 6. **Video buffers in GPU memory go straight to the compositor.** On hold: upstream has nothing that creates those buffers yet. [Note](#6-gpu-memory-buffers-as-dma-bufs)
@@ -237,41 +237,50 @@ I haven't seen a malformed id, though: the ids come from SurfaceFlinger's `TID:<
 
 ### Plan: one refresh-rate PR that follows the monitor
 
-Not started. Android has to follow the monitor a window is on, or the change does little: with only the extra configs, Android stays at its peak rate on every monitor. So the PR has two commits, and the refresh-rate commit leaves #93, which the maintainer called "quite large".
+Written and tested on its own; not pushed or opened yet. Android has to follow the monitor a window is on, or the change does little: with only the extra configs, Android stays at its peak rate on every monitor. So the PR has two commits, and the refresh-rate commit leaves #93, which the maintainer called "quite large". Head `426a62d` on the local branch `pr/refresh-rates` (worktree `.worktrees/refresh-rates`), on top of `lineage-20`; +245/−32 in 15 files.
 
-**Commit 1, offer a config per rate, rewritten leaner.** `9e44127` is +236/−23, mostly in a new `refresh.cpp` with a nine-function API. Because the list of rates only grows, the composer doesn't need to know which output has which rate, so most of that goes:
+**Commit 1, `7f86609` "hwcomposer: offer a display config for each monitor refresh rate"**, +67/−26 in 4 files, against +236/−23 for `9e44127`, which does the same in #93. `struct display` keeps a mutex-guarded list of the monitors' current rates (each mode flagged `WL_OUTPUT_MODE_CURRENT`), one config each. A new rate is appended, never sorted in, so a config index always means the same rate, and it is announced with a primary display hotplug. `getActiveConfig`, `setActiveConfig` and each config's exact vsync period come from that list. Dropped from `9e44127`: `refresh.cpp` and its nine-function API, the per-output state and pending modes, the `wl_output` v1 fallback, and releasing removed outputs (a separate leak fix upstream lacks too).
 
-- dropped: `refresh.cpp` and its declarations, the per-output map, the pending mode held until `wl_output.done`, the `wl_output` v1 fallback, and releasing removed outputs, which is a separate leak fix that upstream doesn't have either;
-- kept: a mutex-guarded list of rates in `struct display`, fastest first, the config index being the position; the exact period per config; `getActiveConfig` and `setActiveConfig`; and a hotplug when a rate not seen before appears.
+**Commit 2, `426a62d` "hwcomposer: run Android at the refresh rate of the monitor a window is on"**, +178/−6 in 13 files:
 
-`output_handle_mode()` adds the rate of each mode flagged `WL_OUTPUT_MODE_CURRENT`. Estimated at about +80/−20 in `hwcomposer.cpp`, `wayland-hwc.cpp` and `wayland-hwc.h`.
+- `interfaces/task/1.1/IWaydroidTask.hal` and its `Android.bp` (41 lines) extend 1.0 with `oneway setRefreshRate(uint32_t millihertz)`. Upstream bumped `window` the same way (`720b677`, +83/−2 with its feature). The interfaces have no `current.txt`, so 1.0 could take the method instead.
+- The task HAL implements 1.1. `setRefreshRate()` writes `min_refresh_rate` = 0, then `peak_refresh_rate`, then `min_refresh_rate`, through `waydroidplatform`'s `settingsPutString(1 /* SETTINGS_SYSTEM */, ...)`, which keeps the range valid whichever way the rate moves. Its hand-written `IPlatform` client gains that call (transaction `FIRST_CALL_TRANSACTION + 8`; the live service is `lineageos.waydroid.IPlatform`), which is 44 of the lines. `android_frameworks_waydroid` doesn't change.
+- The composer (+63 in `wayland-hwc.cpp`) adds a `wl_surface_listener` to each window and records the outputs each window is on. When the fastest of them changes, it calls `setRefreshRate()`. Moving a window from one monitor to another changes that fastest rate once, so it needs no settle delay. It gets the 1.1 service with `castFrom` and skips the call when only 1.0 is there.
 
-**Commit 2, follow the monitor.** Estimated at about +120, of which about 40 lines are the version bump's `.hal` and `Android.bp`. Upstream's `window` 1.2 bump with its feature was +83/−2 (`720b677`).
+**`waydroid/android_device_waydroid_waydroid`, one line, not written yet:** `manifest.xml` declares `vendor.waydroid.task` at version 1.0, and hwservicemanager registers only declared versions, so it has to say 1.1. That is a second PR that has to merge with the first.
 
-- `interfaces/task/1.1/IWaydroidTask.hal` extends 1.0 with `oneway setRefreshRate(uint32_t millihertz)`. The task HAL already gets `waydroidplatform`'s `IPlatform` for `getAppName()`; the new method writes `peak_refresh_rate` and `min_refresh_rate` through `settingsPutString(1 /* SETTINGS_SYSTEM */, KEY, "165.018")`. It moves the bound in the direction of the change first, so the range is never empty. `IPlatform.settingsPutString` is already in `WayDroidService`, so `android_frameworks_waydroid` doesn't change. The interfaces have no `current.txt`, so 1.0 could take the method instead, but upstream bumps versions for additions.
-- The composer keeps each output's current rate and, with a `wl_surface_listener` on each window, the outputs each window is on. When the fastest of them changes, and stays the same for 300 ms (a window dragged across monitors enters several), it calls `setRefreshRate()`. It gets the 1.1 service with `IWaydroidTask::castFrom` and skips the call when only 1.0 is there.
-
-**`waydroid/android_device_waydroid_waydroid`, one line:** `manifest.xml` declares `vendor.waydroid.task` at version 1.0, and hwservicemanager registers only declared versions, so it has to say 1.1. That is a second PR that has to merge with the first.
+A Bugbot review of both commits listed six findings; none needed a change. The one that only a test could settle, a monitor unplugged under a window, passed (test 3 below).
 
 Open question for the maintainer, asked in the PR: the two settings are the ones behind Settings > Display > Smooth display, so following the monitor overrides the user's choice there. It could be on by default or behind a property such as `persist.waydroid.follow_refresh_rate`.
 
 For this fork: `waydroid-app-displays` sets the same two settings for the per-app windows, and the composer would set them for its own windows. With windows of both kinds on monitors with different rates, they would overwrite each other. The service could leave the settings alone while the composer has windows, or the composer could take the service's windows into account through a property.
 
-Steps:
+#### Test of the branch alone (2026-11-08, GNOME 51)
 
-1. Write commit 1 on `lineage-20` in a new `pr/refresh-rates`, replacing the stale branch of that name (`dd1d698`, 2026-11-04). Check that `dumpsys SurfaceFlinger` lists the same configs and periods as with `9e44127`.
-2. Write commit 2, and the manifest line on a branch of `android_device_waydroid_waydroid`. Compile both with `stack/build.sh`.
-3. Test the branch alone. In hybrid MUX mode with `gpu = auto`, Android runs stock GBM graphics on the AMD GPU, so only this composer and task HAL differ from upstream. Plug in a 60 Hz monitor next to the 165 Hz panel (`gnome/vmon.py` or KRDP's virtual monitor, from `~/.local/share/waydroid-test`), and check on GNOME and KDE:
-   - `dumpsys SurfaceFlinger` lists a config at 165.02 Hz and one at 60 Hz, each with the exact period;
-   - moving the full UI window to the 60 Hz monitor switches Android to 60 Hz, and moving it back returns it to 165.02 Hz, three times;
-   - in single-window mode, the same with an app's window;
-   - unplugging the 60 Hz monitor with the window on it returns Android to 165.02 Hz;
-   - apps keep drawing across each switch, checked with `draws.sh`.
-4. Put the same two commits into `all-fixes` in place of `9e44127`, resolve the overlap with `waydroid-app-displays`, and rerun step 3 there with per-app windows.
-5. Force-push `pr/multi-window` to `206558d` with `--force-with-lease=pr/multi-window:9e44127`. The five commits keep their SHAs, so the review threads stay attached.
-6. Open both PRs, each linking the other, with the draft below filled in from step 3.
-7. Edit #93's description: drop change 6 and the "Refresh rate" heading, change the first line to "Fixes items 4 to 7 of waydroid/waydroid#2470", and add "The refresh rate change moved to #NEW, which also makes Android follow the monitor." Post that sentence as a comment on #93 too. Change #2470's last line to name both PRs.
-8. Update the top list and this section.
+Hybrid MUX mode with `gpu` unset, so Android ran stock Mesa on the AMD GPU, and the overlay held only this branch's composer, `task@1.1` library and task HAL service, plus the vendor manifest at `task` 1.1. A 60 Hz virtual monitor (`gnome/vmon.py`) sat next to the 165.019 Hz panel at scale 1.67.
+
+| Test | Result |
+|---|---|
+| Configs after plugging in the 60 Hz monitor | Android's display listed 165 Hz and 60 Hz, the second added by hotplug |
+| Full UI window moved to the 60 Hz monitor and back, 3 times | 60.00 Hz with both settings 60.000 on the monitor; 165.02 Hz with both settings 165.018 on the panel, every time |
+| App window (Settings, single-window mode), 3 times | the same |
+| 60 Hz monitor unplugged with the window on it | GNOME moved the window to the panel; Android back to 165.02 Hz |
+| Drawing after each move (`draws.sh`) | passed every time; the first swipe after the first move changed nothing, and its rerun passed |
+| Crashes | none |
+
+The first attempt crashed the task HAL service on its first call, because of the test build: Waydroid's `libhwbinder` adds a virtual `isHostHwBinder()` to `IBinder`, which AOSP's headers lack. With Waydroid's `libhwbinder` and `libhidl` header patches and its `hidl-gen` change applied, the stub's vtable matched the image's (264 bytes) and the service ran. `~/.local/share/waydroid-test/hidl-test-build.md` on this laptop has the recipe.
+
+Not tested yet: KDE and Hyprland, NVIDIA-only mode, multi-window mode, and the branch inside `all-fixes` with per-app windows.
+
+Steps left:
+
+1. Write the manifest line on a branch of `android_device_waydroid_waydroid`.
+2. Push `pr/refresh-rates`, replacing the stale branch of that name (`dd1d698`, 2026-11-04).
+3. Put the same two commits into `all-fixes` in place of `9e44127`, resolve the overlap with `waydroid-app-displays`, and test there with per-app windows.
+4. Force-push `pr/multi-window` to `206558d` with `--force-with-lease=pr/multi-window:9e44127`. The five commits keep their SHAs, so the review threads stay attached.
+5. Open both PRs, each linking the other, with the draft below.
+6. Edit #93's description: drop change 6 and the "Refresh rate" heading, change the first line to "Fixes items 4 to 7 of waydroid/waydroid#2470", and add "The refresh rate change moved to #NEW, which also makes Android follow the monitor." Post that sentence as a comment on #93 too. Change #2470's last line to name both PRs.
+7. Update the top list and this section.
 
 Title: `hwcomposer: run Android at the refresh rate of the monitor a window is on`
 
@@ -284,16 +293,21 @@ The primary display has one config. Its vsync period is fixed at boot from the h
 
 ## Changes
 
-1. `hwcomposer: offer a display config for each monitor refresh rate` offers one config per refresh rate seen since the composer started, with the exact period (165.018 Hz is 6059945 ns). `setActiveConfig` switches the vsync period, so Android changes rate with a normal mode switch. A rate not seen before is added with a primary display hotplug. The list never shrinks, because switching rates by hotplug stalled apps on virtual displays when the switch came with a density change.
-2. `hwcomposer: follow the refresh rate of the monitor a window is on` tracks the outputs each window is on. When the fastest of them changes and holds for 300 ms, the composer calls the new `IWaydroidTask@1.1::setRefreshRate()`, which sets `min_refresh_rate` and `peak_refresh_rate` through `waydroidplatform`. Android then picks the matching config.
+1. `hwcomposer: offer a display config for each monitor refresh rate` offers one config per refresh rate a monitor has had since the composer started, with the exact period (165.018 Hz is 6059945 ns). `setActiveConfig` switches the vsync period, so Android changes rate with a normal mode switch. A rate not seen before is appended and announced with a primary display hotplug. The list never shrinks or reorders, so a config index always means the same rate.
+2. `hwcomposer: run Android at the refresh rate of the monitor a window is on` tracks the outputs each window is on. When the fastest of them changes, the composer calls the new `IWaydroidTask@1.1::setRefreshRate()`, which sets `min_refresh_rate` and `peak_refresh_rate` through `waydroidplatform`. Android then picks the matching config.
 
 The two settings are the ones behind Settings > Display > Smooth display, so this overrides the user's choice there. Would you rather have it behind a property?
 
 ## Testing
 
-STEP 3 RESULTS
+Waydroid 1.6.3 with the LineageOS 20 images (system 20260927, vendor 20261022), stock Mesa on an AMD iGPU, GNOME 51, a 60 Hz monitor next to a 165 Hz panel. Only this branch's composer, `task@1.1` library and task HAL service, with the vendor manifest at `task` 1.1, were on top of the images:
 
-I built the module outside the AOSP tree against the Android 13 VNDK v33 headers, so it has not been through a Soong build.
+- Plugging in the 60 Hz monitor added a 60 Hz config next to 165 Hz.
+- Moving the full Waydroid window to the 60 Hz monitor switched Android to 60.00 Hz, with both settings at 60.000, and moving it back returned it to 165.02 Hz. The same with an app's window in single-window mode. Three round trips each, and apps kept drawing.
+- Unplugging the 60 Hz monitor with the window on it returned Android to 165.02 Hz.
+- No crashes.
+
+I haven't tested KDE, Hyprland or multi-window mode yet. I built the modules outside the AOSP tree against the Android 13 VNDK v33 headers, so they have not been through a Soong build.
 ```
 
 ## 4. Video colours
