@@ -1,6 +1,6 @@
 # Upstream pull requests and issues
 
-What this fork plans to send to Waydroid, in plain words. Merged on 2026-11-07 by aleasto: [android_vendor_waydroid#57](https://github.com/waydroid/android_vendor_waydroid/pull/57), [#58](https://github.com/waydroid/android_vendor_waydroid/pull/58), and [#59](https://github.com/waydroid/android_vendor_waydroid/pull/59). Open, each with his first review questions from 2026-11-07: [#92](https://github.com/waydroid/android_hardware_waydroid/pull/92), [#93](https://github.com/waydroid/android_hardware_waydroid/pull/93) for issue [waydroid#2470](https://github.com/waydroid/waydroid/issues/2470), and [#94](https://github.com/waydroid/android_hardware_waydroid/pull/94) for issue [waydroid#2471](https://github.com/waydroid/waydroid/issues/2471). Opened on 2026-11-10: [#95](https://github.com/waydroid/android_hardware_waydroid/pull/95), the refresh rate split out of #93, with [android_device_waydroid_waydroid#18](https://github.com/waydroid/android_device_waydroid_waydroid/pull/18). The draft answers are under "Reply to review" in sections 1, 3, and 4. Replies are posted on [#2464](https://github.com/waydroid/waydroid/issues/2464#issuecomment-6617138955) and [#91](https://github.com/waydroid/android_hardware_waydroid/pull/91#issuecomment-6618281541), and the NVIDIA bug report is [forum thread 387942](https://forums.developer.nvidia.com/t/vulkan-some-nv12-dma-bufs-imported-as-two-plane-images-read-back-wrong-615-78-08/387942). A question about media controls is posted on [#868](https://github.com/waydroid/waydroid/issues/868#issuecomment-6686462350), and one about title bars and Back on [#1119](https://github.com/waydroid/waydroid/issues/1119#issuecomment-6704203289). Nothing else has been posted.
+What this fork plans to send to Waydroid, in plain words. Items 11 to 14 are what the fork has that is not sent yet. Merged on 2026-11-07 by aleasto: [android_vendor_waydroid#57](https://github.com/waydroid/android_vendor_waydroid/pull/57), [#58](https://github.com/waydroid/android_vendor_waydroid/pull/58), and [#59](https://github.com/waydroid/android_vendor_waydroid/pull/59). Open, each with his first review questions from 2026-11-07: [#92](https://github.com/waydroid/android_hardware_waydroid/pull/92), [#93](https://github.com/waydroid/android_hardware_waydroid/pull/93) for issue [waydroid#2470](https://github.com/waydroid/waydroid/issues/2470), and [#94](https://github.com/waydroid/android_hardware_waydroid/pull/94) for issue [waydroid#2471](https://github.com/waydroid/waydroid/issues/2471). Opened on 2026-11-10: [#95](https://github.com/waydroid/android_hardware_waydroid/pull/95), the refresh rate split out of #93, with [android_device_waydroid_waydroid#18](https://github.com/waydroid/android_device_waydroid_waydroid/pull/18). The draft answers are under "Reply to review" in sections 1, 3, and 4. Replies are posted on [#2464](https://github.com/waydroid/waydroid/issues/2464#issuecomment-6617138955) and [#91](https://github.com/waydroid/android_hardware_waydroid/pull/91#issuecomment-6618281541), and the NVIDIA bug report is [forum thread 387942](https://forums.developer.nvidia.com/t/vulkan-some-nv12-dma-bufs-imported-as-two-plane-images-read-back-wrong-615-78-08/387942). A question about media controls is posted on [#868](https://github.com/waydroid/waydroid/issues/868#issuecomment-6686462350), and one about title bars and Back on [#1119](https://github.com/waydroid/waydroid/issues/1119#issuecomment-6704203289). Nothing else has been posted.
 
 1. **Smoother window resizing, without the crash.** Dragging a window edge made Android rebuild its screen about 150 times in 8 seconds, and Android's graphics crashed during the rebuilds ([#2464](https://github.com/waydroid/waydroid/issues/2464)). [#92](https://github.com/waydroid/android_hardware_waydroid/pull/92) cuts the rebuilds to about 15 and stretches the old frame meanwhile. It is open, with 150 ms as the default since the maintainer asked why it should stay off by default once the null check was merged. [android_vendor_waydroid#57](https://github.com/waydroid/android_vendor_waydroid/pull/57), the null check that SurfaceFlinger crashed on, is merged, and the maintainer closed #2464. [Drafts](#1-resizing-and-the-surfaceflinger-crash)
 2. **No more black flashes in the full Waydroid window.** The window was shown before Android finished drawing it. One PR. [Draft](#2-black-flashes-in-the-full-ui)
@@ -12,6 +12,10 @@ What this fork plans to send to Waydroid, in plain words. Merged on 2026-11-07 b
 8. **Android media players in the desktop's media controls.** Apple Music, YouTube and other players show in the desktop's media widget with their title, cover and position, and take play, pause, skip and seek. Requested in [waydroid#868](https://github.com/waydroid/waydroid/issues/868) since 2023. Two PRs, one in `android_frameworks_waydroid` and one in `waydroid/waydroid`, built the way Waydroid already forwards notifications. [Asked the maintainer on #868](https://github.com/waydroid/waydroid/issues/868#issuecomment-6686462350) how he wants the PRs; no reply yet, and not written yet. The fork's working version runs as a separate helper, which upstream would not take as it is. [Plan](#8-media-controls-over-mpris)
 9. **Desktop title bars on app windows.** On KDE, each app window gets KWin's own title bar, with minimize, maximize and close. Where the compositor draws none, as on GNOME, the window draws its own, with a Back button next to the window buttons. Requested in [waydroid#1119](https://github.com/waydroid/waydroid/issues/1119), where the maintainer said it needs one Android display per app. The fork's `waydroid-app-displays` has that, so it is a comment on the issue, not a PR. [Posted](https://github.com/waydroid/waydroid/issues/1119#issuecomment-6704203289) on 2026-11-07; it also asks the maintainer about the Back patch in item 10. [Draft](#9-desktop-title-bars)
 10. **Back leaves an app's first screen on other displays.** Waydroid's patch 0032 ignores Back on a task's first screen unless the full UI is active, so an app on its own display could never leave its first screen. A new vendor patch keeps that rule on the default display only. Merged as [android_vendor_waydroid#59](https://github.com/waydroid/android_vendor_waydroid/pull/59) on 2026-11-07. [Draft](#10-back-on-other-displays)
+11. **Android's graphics on NVIDIA, through Venus.** Not sent. The fork's biggest piece: Android renders through Vulkan on the host's NVIDIA driver instead of software rendering. It needs changes in virglrenderer, Mesa, Waydroid's gralloc and the Waydroid host tools, so it starts with upstream projects and a question to the maintainer. [Plan](#11-nvidia-graphics-through-venus)
+12. **Video decoded on the host GPU.** Not sent. Depends on item 11. [Plan](#12-video-decoded-on-the-host-gpu)
+13. **Each app in its own window.** Not sent as code; asked on #1119 (item 9). [Plan](#13-each-app-in-its-own-window)
+14. **Kept in the fork.** Widevine, the installers and the test tooling. [List](#14-kept-in-the-fork)
 
 Every head branch below starts from upstream `lineage-20` and is on `TechyAditya/android_hardware_waydroid` unless it says otherwise. Each one compiles alone with `stack/build.sh`. The changes ran together in the `all-fixes` build, not branch by branch. To open a pull request from a draft, save the body to a file and run:
 
@@ -610,3 +614,56 @@ I hit this with apps on their own virtual displays, each shown in its own Waylan
 
 The patch applies after 0032 to LineageOS `android_frameworks_base` `lineage-20.0`. I have not built it in an AOSP tree. I ran the same check as a smali change to `ActivityClientController.onBackPressed()` in the `20260927` x86_64 `services.jar`, on Waydroid 1.6.3 with KDE Plasma 6.8. With apps on their own virtual displays, Back on Clock's and Settings' first screens logged `moveTaskToBack`, and Back on Free up space finished it and showed Settings again. Without it, none of the three did anything.
 ```
+
+## 11. NVIDIA graphics through Venus
+
+Not sent; nothing posted. Waydroid has no GPU acceleration on NVIDIA's driver: Android falls back to software rendering, or to an Intel or AMD GPU when there is one. Requested in [waydroid#1883](https://github.com/waydroid/waydroid/issues/1883) (74 comments) and [waydroid#564](https://github.com/waydroid/waydroid/issues/564) (42), with [#1234](https://github.com/waydroid/waydroid/issues/1234) asking for Zink.
+
+This fork's `waydroid-venus` (`TechyAditya/waydroid-venus`, 56 commits: three patches to other projects, about 350 lines of its own allocator and gralloc code, and the install and service files) runs Android's Vulkan through Venus on the host's NVIDIA driver, and GLES through ANGLE on top. The render server runs on the host as a sandboxed system service and receives Android's buffers as dma-bufs.
+
+Other work on the same problem:
+
+- [Shiro836/waydroid-nvidia](https://github.com/Shiro836/waydroid-nvidia) runs NVK, Mesa's open-source NVIDIA Vulkan driver, inside Android, on a Rust client for the open kernel modules' resource manager, with ANGLE and `minigbm_gbm_mesa`. [cagedbird043/waydroid-a17-nvidia](https://github.com/cagedbird043/waydroid-a17-nvidia) ports it to Android 17 and reports 82% of host performance in Basemark GPU, with NVDEC and NVENC ([#1883](https://github.com/waydroid/waydroid/issues/1883), 2026-10-31). It needs the open kernel modules, so Turing or newer.
+- On #564, zzyiwei, who works on Venus in Mesa, offered in 2025 to help with "the dma-buf import path via Virgl vtest" and the same "in venus vtest backend". That is what the fork's virglrenderer and Mesa patches add.
+- aleasto said on #564 (2025-07-20) that Waydroid now uses `minigbm_gbm_mesa`, and implements the composer rather than SurfaceFlinger.
+
+Venus uses the host's own NVIDIA Vulkan driver, so Android gets the same driver features and fixes as the desktop. NVK in Android needs no host service, but runs Mesa's driver instead of NVIDIA's. This fork has run only on an RTX 3060 with the open kernel modules (driver 615, now 620.70.06); the closed kernel modules and older GPUs are untested.
+
+The pieces, by where they would go:
+
+| Piece | Fork source | Upstream target |
+| --- | --- | --- |
+| vtest commands to import dma-bufs and memfds into the render server | `patches/virglrenderer-vtest-import-fd.patch`, +561/−1, against virglrenderer 1.3.0 | [virglrenderer](https://gitlab.freedesktop.org/virgl/virglrenderer) merge request |
+| Venus over vtest on Android: share gralloc buffers through the new commands | `patches/mesa-venus-vtest-android.patch`, +577/−22, in `src/virtio/vulkan` and `src/util/u_gralloc` | [Mesa](https://gitlab.freedesktop.org/mesa/mesa) merge request |
+| `gralloc.default` with 128-byte rows, YUV and wide-colour formats, and GPU memory from the allocator | `patches/gralloc-waydroid-venus.patch`, +264/−32 in `hardware/libhardware` `modules/gralloc` | a patch in `android_vendor_waydroid` `waydroid-patches/base-patches-33/hardware/libhardware` |
+| `waydroid-alloc`, which allocates render targets in GPU memory with GBM on the NVIDIA GPU | `alloc/` | `waydroid/waydroid` (a host service it starts with the container), or the render server |
+| Starting the render server and allocator, the Venus properties (`ro.hardware.egl=angle`, `ro.hardware.vulkan=virtio`, two `mesa.*`), and the `gpu` choice in `waydroid.cfg` | `install.sh`, `waydroid-venus-gpu`, the `.service` units | `waydroid/waydroid` `tools/helpers/gpu.py` and the container start |
+| The Venus Vulkan driver and ANGLE in the image | built by `build.sh` | `android_vendor_waydroid` or the device tree, so the images ship them |
+
+Suggested order:
+
+1. Ask on #1883 before any code: say what works (with numbers), how it differs from the NVK route, and ask the maintainer which route Waydroid would take. If he prefers NVK, items 2 and 3 are still useful to Mesa and virglrenderer on their own.
+2. Open an issue on virglrenderer for the vtest import commands, mention zzyiwei's offer, then the merge request.
+3. Then the Mesa merge request, which depends on the vtest protocol from step 2.
+4. Then the Waydroid pieces, one PR per repository, after the maintainer's answer.
+
+Before step 1: measure Android's performance on Venus the way the NVK report did (Basemark GPU or 3DMark Wild Life Extreme), so the two can be compared, and retest on driver 620.
+
+## 12. Video decoded on the host GPU
+
+Not sent. `waydroid-venus/hwdec`: Android's `OMX.waydroid.*` decoders send the compressed stream to a host service, `waydroid-hwdec`, which decodes with FFmpeg through CUDA, VA-API or Vulkan and writes frames into Android's buffers in GPU memory. It handles 10-bit and HDR10 video, and tags SDR video as sRGB (item 4). About 2800 lines.
+
+It depends on item 11's GPU-memory buffers and allocator, so it waits for item 11. On Intel and AMD, Waydroid's stock decoders already use the GPU through Mesa. The NVK route in item 11 reports NVDEC and NVENC inside Android instead.
+
+## 13. Each app in its own window
+
+Not sent as code. `TechyAditya/waydroid-app-displays` (28 commits) gives each app its own Android display and Wayland window, with its own size, scale and refresh rate, title bars (item 9), media controls over MPRIS (item 8), and a command-line tool to drive and capture apps. It runs as a separate `app_process` service inside Android plus a host command, which upstream would not take in that form.
+
+The maintainer said on [#1119](https://github.com/waydroid/waydroid/issues/1119) that title bars need one Android display per app. The comment posted there on 2026-11-07 (item 9) says this fork has that; a port would wait for his answer. The pieces that would go upstream on their own are already PRs: the composer's single-window fixes (#93) and the refresh rate (#95).
+
+## 14. Kept in the fork
+
+- Widevine L3 (`install-widevine.sh`): Google's proprietary library, which Waydroid can't ship.
+- The installers in `stack/` and `waydroid-venus`, which build and install the fork on a stock Waydroid.
+- `stack/surfaceflinger.sh`, a binary patch of the 20260927 SurfaceFlinger, until an image has [android_vendor_waydroid#57](https://github.com/waydroid/android_vendor_waydroid/pull/57). The same goes for `stack/services.sh` and [#59](https://github.com/waydroid/android_vendor_waydroid/pull/59).
+- The test tooling (`waydroid-venus/hwdec/test`, the RGBA output test) and the per-app window service's debugging commands.
