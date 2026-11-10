@@ -247,7 +247,7 @@ Written and tested on its own; not pushed or opened yet. Android has to follow t
 - The task HAL implements 1.1. `setRefreshRate()` writes `min_refresh_rate` = 0, then `peak_refresh_rate`, then `min_refresh_rate`, through `waydroidplatform`'s `settingsPutString(1 /* SETTINGS_SYSTEM */, ...)`, which keeps the range valid whichever way the rate moves. Its hand-written `IPlatform` client gains that call (transaction `FIRST_CALL_TRANSACTION + 8`; the live service is `lineageos.waydroid.IPlatform`), which is 44 of the lines. `android_frameworks_waydroid` doesn't change.
 - The composer (+63 in `wayland-hwc.cpp`) adds a `wl_surface_listener` to each window and records the outputs each window is on. When the fastest of them changes, it calls `setRefreshRate()`. Moving a window from one monitor to another changes that fastest rate once, so it needs no settle delay. It gets the 1.1 service with `castFrom` and skips the call when only 1.0 is there.
 
-**`waydroid/android_device_waydroid_waydroid`, one line, not written yet:** `manifest.xml` declares `vendor.waydroid.task` at version 1.0, and hwservicemanager registers only declared versions, so it has to say 1.1. That is a second PR that has to merge with the first.
+**`waydroid/android_device_waydroid_waydroid`, one line, committed locally as `81ccfc8` on branch `task-hal-1.1` in `~/Code/android_device_waydroid_waydroid`, on top of `lineage-20`:** `manifest.xml` declares `vendor.waydroid.task` at version 1.0, and hwservicemanager registers only declared versions, so it has to say 1.1. That is a second PR that has to merge with the first.
 
 A Bugbot review of both commits listed six findings; none needed a change. The one that only a test could settle, a monitor unplugged under a window, passed (test 3 below).
 
@@ -274,7 +274,7 @@ Not tested yet: KDE and Hyprland, NVIDIA-only mode, multi-window mode, and the b
 
 Steps left:
 
-1. Write the manifest line on a branch of `android_device_waydroid_waydroid`.
+1. Fork `android_device_waydroid_waydroid` and push `task-hal-1.1`.
 2. Push `pr/refresh-rates`, replacing the stale branch of that name (`dd1d698`, 2026-11-04).
 3. Put the same two commits into `all-fixes` in place of `9e44127`, resolve the overlap with `waydroid-app-displays`, and test there with per-app windows.
 4. Force-push `pr/multi-window` to `206558d` with `--force-with-lease=pr/multi-window:9e44127`. The five commits keep their SHAs, so the review threads stay attached.
