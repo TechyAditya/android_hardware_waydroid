@@ -8,8 +8,8 @@ here=$(cd "$(dirname "$0")" && pwd)
 build=$here/build
 
 # The render server inlines shader calls for NVIDIA's compiler with SPIRV-Tools
-if [ ! -e /usr/include/spirv-tools/libspirv.h ]; then
-   echo "Missing SPIRV-Tools headers (spirv-tools package)." >&2
+if ! pkg-config --exists SPIRV-Tools; then
+   echo "Missing SPIRV-Tools (spirv-tools package)." >&2
    exit 1
 fi
 # install.sh copies the host build to /usr/local/lib/waydroid-venus
@@ -31,25 +31,32 @@ android_api=33
 
 mkdir -p "$build/out"
 
-# Checks out COMMIT of URL into DIR with PATCH applied.  An existing tree is
-# used only if it is at COMMIT with exactly PATCH applied, so an interrupted
-# run or an updated patch cannot build stale sources.
 # Checks out COMMIT of URL into DIR with PATCH... applied. One patch stays an
 # uncommitted change; several are committed one by one, so that each can be
-# compared with its file.
+# compared with its file. An existing tree is used only if it is at COMMIT
+# with exactly these patches, so an interrupted run or an updated patch cannot
+# build stale sources.
 fetch() {
    local url=$1 commit=$2 dir=$3
    shift 3
+   # a clean tree from before the later patches were added holds no local work
+   if [ -d "$dir" ] && [ $# -gt 1 ] &&
+      [ "$(git -C "$dir" rev-parse HEAD)" = "$commit" ] &&
+      git -C "$dir" diff HEAD | cmp -s - "$1" &&
+      [ -z "$(git -C "$dir" ls-files --others --exclude-standard)" ]; then
+      echo "fetching $dir again with its new patches"
+      rm -rf "$dir"
+   fi
    if [ -d "$dir" ]; then
       local ok=true i
       if [ $# -eq 1 ]; then
          [ "$(git -C "$dir" rev-parse HEAD)" = "$commit" ] &&
             git -C "$dir" diff HEAD | cmp -s - "$1" || ok=false
       else
-         [ "$(git -C "$dir" rev-parse "HEAD~$#")" = "$commit" ] || ok=false
+         [ "$(git -C "$dir" rev-parse -q --verify "HEAD~$#" 2> /dev/null)" = "$commit" ] || ok=false
          for ((i = 0; i < $#; i++)); do
             local p=$((i + 1))
-            git -C "$dir" show --format= "HEAD~$(($# - 1 - i))" | cmp -s - "${!p}" || ok=false
+            git -C "$dir" show --format= "HEAD~$(($# - 1 - i))" 2> /dev/null | cmp -s - "${!p}" || ok=false
          done
          [ -z "$(git -C "$dir" diff HEAD)" ] || ok=false
       fi
