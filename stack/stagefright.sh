@@ -72,6 +72,8 @@ for target in "${targets[@]}"; do
     fi
     printf "$bytes" | dd of="$tmp/$dir.so" bs=1 seek=$((offset)) conv=notrunc status=none
     [[ $(sha "$tmp/$dir.so") == "$patched" ]] || { echo "the patched system/$dir/libstagefright.so does not match" >&2; exit 1; }
-    install -D -m 0644 -o root -g root "$tmp/$dir.so" "$installed"
+    # a partial write would load in Android, and its hash would no longer mark it as ours
+    install -D -m 0644 -o root -g root "$tmp/$dir.so" "$installed.new"
+    mv -f "$installed.new" "$installed"
     echo "installed system/$dir/libstagefright.so with HDR thumbnails on the CPU path"
 done

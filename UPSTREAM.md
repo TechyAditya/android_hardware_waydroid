@@ -648,6 +648,7 @@ The pieces, by where they would go:
 | Piece | Fork source | Upstream target |
 | --- | --- | --- |
 | vtest commands to import dma-bufs and memfds into the render server | `patches/virglrenderer-vtest-import-fd.patch`, +561/−1, against virglrenderer 1.3.0 | [virglrenderer](https://gitlab.freedesktop.org/virgl/virglrenderer) merge request |
+| Inlining shader calls with SPIRV-Tools before NVIDIA's proprietary compiler sees them, because it crashes on Android's HDR tone-mapping shader | `patches/virglrenderer-nvidia-spirv-flatten.patch`, +342/−5, on top of the vtest patch | an NVIDIA bug report with the captured shader first; a virglrenderer merge request only if NVIDIA doesn't fix it |
 | Venus over vtest on Android: share gralloc buffers through the new commands | `patches/mesa-venus-vtest-android.patch`, +577/−22, in `src/virtio/vulkan` and `src/util/u_gralloc` | [Mesa](https://gitlab.freedesktop.org/mesa/mesa) merge request |
 | `gralloc.default` with 128-byte rows, YUV and wide-colour formats, and GPU memory from the allocator | `patches/gralloc-waydroid-venus.patch`, +264/−32 in `hardware/libhardware` `modules/gralloc` | a patch in `android_vendor_waydroid` `waydroid-patches/base-patches-33/hardware/libhardware` |
 | `waydroid-alloc`, which allocates render targets in GPU memory with GBM on the NVIDIA GPU | `alloc/` | `waydroid/waydroid` (a host service it starts with the container), or the render server |
@@ -680,4 +681,5 @@ The maintainer said on [#1119](https://github.com/waydroid/waydroid/issues/1119)
 - Widevine L3 (`install-widevine.sh`): Google's proprietary library, which Waydroid can't ship.
 - The installers in `stack/` and `waydroid-venus`, which build and install the fork on a stock Waydroid.
 - `stack/surfaceflinger.sh`, a binary patch of the 20260927 SurfaceFlinger, until an image has [android_vendor_waydroid#57](https://github.com/waydroid/android_vendor_waydroid/pull/57). The same goes for `stack/services.sh` and [#59](https://github.com/waydroid/android_vendor_waydroid/pull/59).
+- `stack/stagefright.sh`, a binary patch of the 20260927 `libstagefright.so` that sends HDR video thumbnails through the CPU path. It works around NVIDIA's shader compiler on this image only, so it has no upstream target.
 - The test tooling (`waydroid-venus/hwdec/test`, the RGBA output test) and the per-app window service's debugging commands.

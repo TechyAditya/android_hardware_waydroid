@@ -60,5 +60,7 @@ fi
 # which skips the default display's ID when there is no default display.
 printf '\x4d\x85\xff\x74\x47' | dd of="$tmp/surfaceflinger" bs=1 seek=$((0x20b40f)) conv=notrunc status=none
 [[ $(sha "$tmp/surfaceflinger") == "$patched_sha" ]] || { echo "the patched SurfaceFlinger does not match" >&2; exit 1; }
-install -D -m 0755 -o root -g 2000 "$tmp/surfaceflinger" "$installed"
+# a partial write would run in Android, and its hash would no longer mark it as ours
+install -D -m 0755 -o root -g 2000 "$tmp/surfaceflinger" "$installed.new"
+mv -f "$installed.new" "$installed"
 echo "installed system/bin/surfaceflinger with the null check"

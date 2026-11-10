@@ -281,7 +281,7 @@ waydroid session stop
 
 An update keeps the settings you changed in `waydroid.cfg`. `stack/install.sh` writes each setting only on the first install that has it, and prints each one it writes.
 
-After a Waydroid image update, run `stack/build.sh` and `sudo ./stack/install.sh` again, because the composer links against the image's libraries, and the vendor manifest the install puts in the overlay is the image's own with `vendor.waydroid.task` at 1.1. The install also removes the patched SurfaceFlinger when the new system image no longer matches it, so the old binary cannot replace the new one.
+After a Waydroid image update, run `stack/build.sh` and `sudo ./stack/install.sh` again, because the composer links against the image's libraries, and the vendor manifest the install puts in the overlay is the image's own with `vendor.waydroid.task` at 1.1. The install also removes the patched SurfaceFlinger and `libstagefright.so` when the new system image no longer matches them, so the old files cannot replace the new ones. Until you run it, Android loads those old files over the new image.
 
 ## Uninstall
 
@@ -303,7 +303,7 @@ waydroid session stop
 - HDR video shows as HDR only while Hyprland runs the monitor in HDR mode. Otherwise it shows as SDR.
 - RGBA video buffers take 2.7 times the memory of NV12. YouTube allocates 13 buffers of 3840x2160 for adaptive playback, which take about 430 MB of GPU memory as RGBA.
 - The stack was tested only on an NVIDIA GPU. The `nv12` route on other GPUs is untested.
-- HDR video thumbnails show without tone mapping, so their colours look flat. Android draws an HDR thumbnail with its GPU tone mapper, and NVIDIA's shader compiler crashed on that shader, taking `mediaserver` down with the render server. The stack now sends HDR thumbnails through Android's CPU path (`stack/stagefright.sh`). The render server also rewrites shaders that call functions before NVIDIA compiles them, which avoids that crash for any app.
+- On the 20260927 system image, HDR video thumbnails show without tone mapping, so their colours look flat. Android draws an HDR thumbnail with its GPU tone mapper, and NVIDIA's shader compiler crashed on that shader, taking `mediaserver` down with the render server. On that image the stack sends HDR thumbnails through Android's CPU path (`stack/stagefright.sh`). The render server also rewrites shaders that call functions before NVIDIA compiles them, which avoids that crash for any app, so on other images HDR thumbnails render tone mapped on the GPU.
 
 ## Where each fix lives
 
